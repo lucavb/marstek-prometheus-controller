@@ -60,7 +60,7 @@ func (c *Client) Query(ctx context.Context) (Sample, error) {
 	if err != nil {
 		return Sample{}, fmt.Errorf("promclient: http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

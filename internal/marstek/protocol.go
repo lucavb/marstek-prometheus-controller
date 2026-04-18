@@ -213,9 +213,8 @@ func normaliseTime(t string) string {
 	if len(parts) != 2 {
 		return t
 	}
-	h := fmt.Sprintf("%02s", parts[0])
-	m := fmt.Sprintf("%02s", parts[1])
 	// Pad with leading zero only when the component is a single digit.
+	var h, m string
 	if len(parts[0]) == 1 {
 		h = "0" + parts[0]
 	} else {
