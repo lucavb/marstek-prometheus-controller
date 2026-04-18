@@ -146,6 +146,12 @@ func (c *Config) validate() error {
 	if c.ControlInterval <= 0 {
 		errs = append(errs, "CONTROL_INTERVAL must be positive")
 	}
+	if c.RampUpWattsPerCycle < 0 {
+		errs = append(errs, "RAMP_UP_WATTS_PER_CYCLE must be >= 0 (0 = unlimited)")
+	}
+	if c.RampDownWattsPerCycle < 0 {
+		errs = append(errs, "RAMP_DOWN_WATTS_PER_CYCLE must be >= 0 (0 = unlimited)")
+	}
 	if c.MinHoldTime < c.ControlInterval {
 		// Warn in log rather than hard-fail; set to one control interval minimum.
 		c.MinHoldTime = c.ControlInterval

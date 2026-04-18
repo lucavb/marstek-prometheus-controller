@@ -380,20 +380,24 @@ func (c *Controller) smooth(watts float64) float64 {
 	return c.smoothed
 }
 
+// applyRamp clamps the per-cycle change from current to target by the
+// configured ramp limits. A zero RampUp/DownWattsPerCycle means "unlimited" —
+// the target passes through unchanged. Negative values are rejected in
+// Config.validate.
 func (c *Controller) applyRamp(current, target int) int {
 	if target > current {
-		limit := current + c.cfg.RampUpWattsPerCycle
-		if c.cfg.RampUpWattsPerCycle == 0 {
-			return current
+		if c.cfg.RampUpWattsPerCycle <= 0 {
+			return target
 		}
+		limit := current + c.cfg.RampUpWattsPerCycle
 		if target > limit {
 			return limit
 		}
 		return target
 	}
 	if target < current {
-		if c.cfg.RampDownWattsPerCycle == 0 {
-			return current
+		if c.cfg.RampDownWattsPerCycle <= 0 {
+			return target
 		}
 		limit := current - c.cfg.RampDownWattsPerCycle
 		if target < limit {

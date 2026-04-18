@@ -97,8 +97,8 @@ All settings are environment variables:
 | `SMOOTHING_ALPHA`             | `0.5`                      | EMA factor for the grid-power signal (0–1, higher = less smoothing) |
 | `DEADBAND_WATTS`              | `25`                       | Suppress commands when smoothed power is within this band           |
 | `IMPORT_BIAS_WATTS`           | `50`                       | Deliberate grid-import headroom; subtracted from the raw target so the battery always leaves this much import rather than driving to exact zero (see [Control bias](#control-bias)) |
-| `RAMP_UP_WATTS_PER_CYCLE`     | `150`                      | Maximum discharge increase per loop iteration                       |
-| `RAMP_DOWN_WATTS_PER_CYCLE`   | `300`                      | Maximum discharge decrease per loop iteration (bypassed on active export — see [Control bias](#control-bias)) |
+| `RAMP_UP_WATTS_PER_CYCLE`     | `150`                      | Maximum discharge increase per loop iteration; `0` = unlimited      |
+| `RAMP_DOWN_WATTS_PER_CYCLE`   | `300`                      | Maximum discharge decrease per loop iteration; `0` = unlimited. Bypassed on active export — see [Control bias](#control-bias). Bypassed on active export also skips `MIN_HOLD_TIME` for that cycle. |
 | `MIN_COMMAND_DELTA_WATTS`     | `25`                       | Suppress commands smaller than this change                          |
 | `MIN_HOLD_TIME`               | `30s`                      | Minimum time between published commands                             |
 | `MIN_OUTPUT_WATTS`            | `80`                       | Lower clamp on non-zero slot power. The B2500 silently clamps `v=0..79` to 80 W on an enabled slot; any computed target in that range is snapped up to this value. A target of exactly 0 W disables the slot (`a<N>=0`) — the only real way to stop discharge. |
