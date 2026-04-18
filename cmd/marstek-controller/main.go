@@ -47,22 +47,22 @@ func run() error {
 	setupLogger(cfg.LogLevel, cfg.LogFormat)
 	slog.Info("marstek-controller starting",
 		"version", version,
-		"device_type", cfg.MarsitekDeviceType,
-		"device_id", cfg.MarsitekDeviceID,
+		"device_type", cfg.MarstekDeviceType,
+		"device_id", cfg.MarstekDeviceID,
 		"broker", cfg.MQTTBrokerURL,
 		"prometheus", cfg.PrometheusBaseURL,
 		"slot", cfg.ScheduleSlot,
 		"schedule", cfg.ScheduleStart+"–"+cfg.ScheduleEnd,
 	)
 
-	m := metrics.New(cfg.MarsitekDeviceID, cfg.MarsitekDeviceType, cfg.MQTTBrokerURL, version)
+	m := metrics.New(cfg.MarstekDeviceID, cfg.MarstekDeviceType, cfg.MQTTBrokerURL, version)
 
 	// Prometheus client.
 	prom := promclient.New(cfg.PrometheusBaseURL, cfg.PrometheusQuery, cfg.PrometheusTimeout)
 
 	// MQTT client.
-	ctrlTopic := marstek.ControlTopic(cfg.MarsitekDeviceType, cfg.MarsitekDeviceID)
-	statusTopic := marstek.StatusTopic(cfg.MarsitekDeviceType, cfg.MarsitekDeviceID)
+	ctrlTopic := marstek.ControlTopic(cfg.MarstekDeviceType, cfg.MarstekDeviceID)
+	statusTopic := marstek.StatusTopic(cfg.MarstekDeviceType, cfg.MarstekDeviceID)
 
 	mqttOpts := mqttclient.Options{
 		BrokerURL: cfg.MQTTBrokerURL,

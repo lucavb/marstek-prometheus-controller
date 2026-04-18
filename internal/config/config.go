@@ -32,8 +32,8 @@ type Config struct {
 	MQTTClientID             string
 	MQTTUsername             string
 	MQTTPassword             string
-	MarsitekDeviceType       string
-	MarsitekDeviceID         string
+	MarstekDeviceType       string
+	MarstekDeviceID         string
 	MQTTStatusStaleAfter     time.Duration
 	MQTTStatusPollTimeout    time.Duration
 	MQTTStatusHardFailAfter  time.Duration
@@ -77,8 +77,8 @@ func Load() (Config, error) {
 		MQTTClientID:            getEnv("MQTT_CLIENT_ID", fmt.Sprintf("marstek-controller-%d", pid)),
 		MQTTUsername:            getEnv("MQTT_USERNAME", ""),
 		MQTTPassword:            getEnv("MQTT_PASSWORD", ""),
-		MarsitekDeviceType:      getEnv("MARSTEK_DEVICE_TYPE", "HMJ-2"),
-		MarsitekDeviceID:        getEnv("MARSTEK_DEVICE_ID", ""),
+		MarstekDeviceType:       getEnv("MARSTEK_DEVICE_TYPE", "HMJ-2"),
+		MarstekDeviceID:         getEnv("MARSTEK_DEVICE_ID", ""),
 		MQTTStatusStaleAfter:    getEnvDuration("MQTT_STATUS_STALE_AFTER", 2*time.Minute),
 		MQTTStatusPollTimeout:   getEnvDuration("MQTT_STATUS_POLL_TIMEOUT", 5*time.Second),
 		MQTTStatusHardFailAfter: getEnvDuration("MQTT_STATUS_HARD_FAIL_AFTER", 5*time.Minute),
@@ -113,7 +113,7 @@ func (c *Config) validate() error {
 	if c.MQTTBrokerURL == "" {
 		errs = append(errs, "MQTT_BROKER_URL is required")
 	}
-	if c.MarsitekDeviceID == "" {
+	if c.MarstekDeviceID == "" {
 		errs = append(errs, "MARSTEK_DEVICE_ID is required")
 	}
 	if c.SmoothingAlpha <= 0 || c.SmoothingAlpha > 1 {
