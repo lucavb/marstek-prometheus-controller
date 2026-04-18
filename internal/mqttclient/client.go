@@ -14,6 +14,7 @@
 package mqttclient
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -22,6 +23,11 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
+
+// ErrNotConnected is returned by Publish when the client has no active broker
+// session. The publish is queued in the single-slot pending buffer and flushed
+// on reconnect. Callers can use errors.Is to classify without string matching.
+var ErrNotConnected = errors.New("mqttclient: not connected")
 
 // MessageHandler is called for every message received on a subscribed topic.
 type MessageHandler func(topic, payload string)
@@ -177,7 +183,7 @@ func (c *Client) Publish(topic, payload string) error {
 		}
 		c.pending = &pendingPublish{topic: topic, payload: payload}
 		c.mu.Unlock()
-		return fmt.Errorf("mqttclient: not connected, queued publish to %s", topic)
+		return fmt.Errorf("%w, queued publish to %s", ErrNotConnected, topic)
 	}
 
 	tok := c.paho.Publish(topic, 0, false, payload)

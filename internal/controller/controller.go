@@ -19,13 +19,17 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/lucavb/marstek-prometheus-controller/internal/marstek"
 	"github.com/lucavb/marstek-prometheus-controller/internal/metrics"
+	"github.com/lucavb/marstek-prometheus-controller/internal/promclient"
 )
 
 // Config holds all tunable parameters for the control loop.
@@ -470,44 +474,42 @@ func classifyPromError(err error) string {
 	if err == nil {
 		return "none"
 	}
-	msg := err.Error()
 	switch {
-	case contains(msg, "empty result"):
+	case errors.Is(err, promclient.ErrEmptyResult):
 		return "empty"
-	case contains(msg, "context deadline") || contains(msg, "timeout"):
+	case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
 		return "timeout"
-	case contains(msg, "parse"):
+	case errors.Is(err, promclient.ErrParse):
 		return "parse"
 	default:
 		return "other"
 	}
 }
 
+// mqttNotConnectedMarker matches the exported prefix of
+// mqttclient.ErrNotConnected. The controller package is not permitted to
+// import internal/mqttclient directly (see AGENTS.md), so we match the
+// sentinel's stable textual prefix rather than the sentinel value itself.
+const mqttNotConnectedMarker = "mqttclient: not connected"
+
 func classifyMQTTError(err error) string {
 	if err == nil {
 		return "none"
 	}
-	msg := err.Error()
 	switch {
-	case contains(msg, "not connected") || contains(msg, "disconnected"):
+	case strings.Contains(err.Error(), mqttNotConnectedMarker):
 		return "disconnected"
-	case contains(msg, "timeout"):
+	case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
 		return "timeout"
 	default:
 		return "other"
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		func() bool {
-			for i := 0; i <= len(s)-len(substr); i++ {
-				if s[i:i+len(substr)] == substr {
-					return true
-				}
-			}
-			return false
-		}())
+// isTimeout returns true for any net.Error that reports Timeout().
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func abs(v int) int {

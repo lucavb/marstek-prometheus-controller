@@ -5,12 +5,24 @@ package promclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+)
+
+// Sentinel errors. Callers can use errors.Is to classify failures without
+// resorting to string matching on wrapped error messages.
+var (
+	// ErrEmptyResult indicates the query returned no samples.
+	ErrEmptyResult = errors.New("promclient: empty result set")
+	// ErrParse indicates the Prometheus response could not be decoded.
+	ErrParse = errors.New("promclient: parse error")
+	// ErrPrometheus indicates a non-success status body from Prometheus.
+	ErrPrometheus = errors.New("promclient: prometheus error")
 )
 
 // Sample is a single instant-query result.
@@ -94,13 +106,13 @@ type apiResult struct {
 func parseResponse(body []byte) (Sample, error) {
 	var r apiResponse
 	if err := json.Unmarshal(body, &r); err != nil {
-		return Sample{}, fmt.Errorf("promclient: parse: %w", err)
+		return Sample{}, fmt.Errorf("%w: %w", ErrParse, err)
 	}
 	if r.Status != "success" {
-		return Sample{}, fmt.Errorf("promclient: prometheus error: %s", r.Error)
+		return Sample{}, fmt.Errorf("%w: %s", ErrPrometheus, r.Error)
 	}
 	if len(r.Data.Result) == 0 {
-		return Sample{}, fmt.Errorf("promclient: empty result set")
+		return Sample{}, ErrEmptyResult
 	}
 
 	res := r.Data.Result[0]
@@ -109,16 +121,16 @@ func parseResponse(body []byte) (Sample, error) {
 	// string-encoded sample value (Prometheus always quotes numeric values).
 	var tsFloat float64
 	if err := json.Unmarshal(res.Value[0], &tsFloat); err != nil {
-		return Sample{}, fmt.Errorf("promclient: parse timestamp: %w", err)
+		return Sample{}, fmt.Errorf("%w: timestamp: %w", ErrParse, err)
 	}
 
 	var valStr string
 	if err := json.Unmarshal(res.Value[1], &valStr); err != nil {
-		return Sample{}, fmt.Errorf("promclient: parse value string: %w", err)
+		return Sample{}, fmt.Errorf("%w: value string: %w", ErrParse, err)
 	}
 	watts, err := strconv.ParseFloat(valStr, 64)
 	if err != nil {
-		return Sample{}, fmt.Errorf("promclient: parse value %q: %w", valStr, err)
+		return Sample{}, fmt.Errorf("%w: value %q: %w", ErrParse, valStr, err)
 	}
 
 	sec := int64(tsFloat)
