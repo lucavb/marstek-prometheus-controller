@@ -88,9 +88,9 @@ func (c *Client) Query(ctx context.Context) (Sample, error) {
 
 // apiResponse is the envelope returned by /api/v1/query.
 type apiResponse struct {
-	Status string      `json:"status"`
-	Data   apiData     `json:"data"`
-	Error  string      `json:"error"`
+	Status string  `json:"status"`
+	Data   apiData `json:"data"`
+	Error  string  `json:"error"`
 }
 
 type apiData struct {
@@ -99,7 +99,7 @@ type apiData struct {
 }
 
 type apiResult struct {
-	Metric map[string]string `json:"metric"`
+	Metric map[string]string  `json:"metric"`
 	Value  [2]json.RawMessage `json:"value"` // [timestamp, value]
 }
 

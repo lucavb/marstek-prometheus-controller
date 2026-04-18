@@ -16,9 +16,9 @@ import (
 // ── fakes ──────────────────────────────────────────────────────────────────
 
 type fakeProm struct {
-	mu      sync.Mutex
-	sample  promclient.Sample
-	err     error
+	mu     sync.Mutex
+	sample promclient.Sample
+	err    error
 }
 
 func (f *fakeProm) Query(_ context.Context) (promclient.Sample, error) {

@@ -22,14 +22,14 @@ type Metrics struct {
 	Registry *prometheus.Registry
 
 	// Controller state (gauges)
-	GridPowerWatts         prometheus.Gauge
-	SmoothedGridPowerWatts prometheus.Gauge
-	TargetSlotPowerWatts   prometheus.Gauge
+	GridPowerWatts          prometheus.Gauge
+	SmoothedGridPowerWatts  prometheus.Gauge
+	TargetSlotPowerWatts    prometheus.Gauge
 	CommandedSlotPowerWatts prometheus.Gauge
-	SlotIndex              prometheus.Gauge
-	MinOutputWatts         prometheus.Gauge
-	MaxOutputWatts         prometheus.Gauge
-	State                  prometheus.Gauge // 0 starting, 1 idle, 2 discharging, 3 holding, 4 fallback
+	SlotIndex               prometheus.Gauge
+	MinOutputWatts          prometheus.Gauge
+	MaxOutputWatts          prometheus.Gauge
+	State                   prometheus.Gauge // 0 starting, 1 idle, 2 discharging, 3 holding, 4 fallback
 
 	// Dependency health (gauges)
 	MQTTConnected                      prometheus.Gauge
@@ -173,9 +173,9 @@ func (m *Metrics) RecordLastMQTTPublish(now time.Time) {
 type State float64
 
 const (
-	StateStarting   State = 0
-	StateIdle       State = 1
+	StateStarting    State = 0
+	StateIdle        State = 1
 	StateDischarging State = 2
-	StateHolding    State = 3
-	StateFallback   State = 4
+	StateHolding     State = 3
+	StateFallback    State = 4
 )

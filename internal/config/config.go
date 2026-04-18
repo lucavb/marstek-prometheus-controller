@@ -28,15 +28,15 @@ type Config struct {
 	PrometheusStaleAfter time.Duration
 
 	// MQTT
-	MQTTBrokerURL            string
-	MQTTClientID             string
-	MQTTUsername             string
-	MQTTPassword             string
+	MQTTBrokerURL           string
+	MQTTClientID            string
+	MQTTUsername            string
+	MQTTPassword            string
 	MarstekDeviceType       string
 	MarstekDeviceID         string
-	MQTTStatusStaleAfter     time.Duration
-	MQTTStatusPollTimeout    time.Duration
-	MQTTStatusHardFailAfter  time.Duration
+	MQTTStatusStaleAfter    time.Duration
+	MQTTStatusPollTimeout   time.Duration
+	MQTTStatusHardFailAfter time.Duration
 
 	// Controller
 	ControlInterval       time.Duration

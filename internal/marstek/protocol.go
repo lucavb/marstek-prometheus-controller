@@ -97,11 +97,11 @@ func BuildTimedDischargePayload(slots [5]Slot, flash bool) string {
 // full key mapping. Only fields relevant to the controller are populated.
 type Status struct {
 	// Battery
-	SOCPercent      int // pe
-	RemainingWh     int // kn
-	DoDPercent      int // do
-	ChargingMode    int // cs: 0=simultaneous, 1=charge-then-discharge
-	AdaptiveMode    int // md: 0=off, 1=on (am in some firmware; md in read payload)
+	SOCPercent   int // pe
+	RemainingWh  int // kn
+	DoDPercent   int // do
+	ChargingMode int // cs: 0=simultaneous, 1=charge-then-discharge
+	AdaptiveMode int // md: 0=off, 1=on (am in some firmware; md in read payload)
 
 	// Outputs (each port)
 	Output1Enabled int // o1
@@ -120,11 +120,11 @@ type Status struct {
 	Solar2Watts int // w2
 
 	// Device info
-	FirmwareMajor   int    // vv
-	FirmwareSub     int    // sv
-	Bootloader      int    // uv
-	RatedOutputWatts int   // lmo
-	SurplusFeedIn   bool   // tc_dis: 0=enabled, 1=disabled
+	FirmwareMajor    int  // vv
+	FirmwareSub      int  // sv
+	Bootloader       int  // uv
+	RatedOutputWatts int  // lmo
+	SurplusFeedIn    bool // tc_dis: 0=enabled, 1=disabled
 
 	// Temperature
 	TempMinC int // tl
