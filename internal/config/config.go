@@ -46,6 +46,7 @@ type Config struct {
 	RampDownWattsPerCycle int
 	MinCommandDeltaWatts  int
 	MinHoldTime           time.Duration
+	MinOutputWatts        int
 	MaxOutputWatts        int
 	PersistToFlash        bool
 	AllowFlashWrites      bool
@@ -89,6 +90,7 @@ func Load() (Config, error) {
 		RampDownWattsPerCycle: getEnvInt("RAMP_DOWN_WATTS_PER_CYCLE", 300),
 		MinCommandDeltaWatts:  getEnvInt("MIN_COMMAND_DELTA_WATTS", 25),
 		MinHoldTime:           getEnvDuration("MIN_HOLD_TIME", 30*time.Second),
+		MinOutputWatts:        getEnvInt("MIN_OUTPUT_WATTS", 80),
 		MaxOutputWatts:        getEnvInt("MAX_OUTPUT_WATTS", 800),
 		AllowFlashWrites:      getEnvBool("ALLOW_FLASH_WRITES", false),
 		PersistToFlash:        getEnvBool("PERSIST_TO_FLASH", false),
@@ -121,6 +123,12 @@ func (c *Config) validate() error {
 	}
 	if c.MaxOutputWatts < 0 {
 		errs = append(errs, "MAX_OUTPUT_WATTS must be >= 0")
+	}
+	if c.MinOutputWatts < 0 {
+		errs = append(errs, "MIN_OUTPUT_WATTS must be >= 0")
+	}
+	if c.MinOutputWatts > c.MaxOutputWatts {
+		errs = append(errs, "MIN_OUTPUT_WATTS must be <= MAX_OUTPUT_WATTS")
 	}
 	if c.ScheduleSlot < 1 || c.ScheduleSlot > 5 {
 		errs = append(errs, "SCHEDULE_SLOT must be 1–5")

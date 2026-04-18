@@ -27,6 +27,7 @@ type Metrics struct {
 	TargetSlotPowerWatts   prometheus.Gauge
 	CommandedSlotPowerWatts prometheus.Gauge
 	SlotIndex              prometheus.Gauge
+	MinOutputWatts         prometheus.Gauge
 	MaxOutputWatts         prometheus.Gauge
 	State                  prometheus.Gauge // 0 starting, 1 idle, 2 discharging, 3 holding, 4 fallback
 
@@ -119,6 +120,7 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		TargetSlotPowerWatts:    newGauge("target_slot_power_watts", "Computed target before ramp/hold limits are applied (W)."),
 		CommandedSlotPowerWatts: newGauge("commanded_slot_power_watts", "Last value actually published to the MQTT schedule slot (W)."),
 		SlotIndex:               newGauge("slot_index", "Timed-discharge slot being driven (1–5)."),
+		MinOutputWatts:          newGauge("min_output_watts", "Lower clamp on non-zero commanded slot power (W)."),
 		MaxOutputWatts:          newGauge("max_output_watts", "Effective upper clamp on commanded slot power (W)."),
 		State:                   newGauge("state", "Controller state: 0=starting 1=idle 2=discharging 3=holding 4=fallback."),
 

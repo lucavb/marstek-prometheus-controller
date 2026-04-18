@@ -148,6 +148,7 @@ func defaultCfg(ctrl, start, end string) controller.Config {
 		RampDownWattsPerCycle: 800,
 		MinCommandDeltaWatts:  1,
 		MinHoldTime:           0,
+		MinOutputWatts:        80,
 		MaxOutputWatts:        800,
 		ControlTopic:          ctrl,
 		ScheduleSlot:          1,
@@ -207,8 +208,11 @@ func TestStep_GridExport_ReducesSlotToZero(t *testing.T) {
 	_ = c.Step(context.Background())
 
 	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("expected a1=0 (slot disabled) for zero discharge, got %q", last)
+	}
 	if !strings.Contains(last, ",v1=0,") {
-		t.Errorf("expected v1=0 (grid export → zero discharge), got %q", last)
+		t.Errorf("expected v1=0 in payload for zero discharge, got %q", last)
 	}
 }
 
@@ -388,8 +392,11 @@ func TestStep_StalePrometheus_Fallback(t *testing.T) {
 		t.Fatal("expected fallback publish on stale prometheus")
 	}
 	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("expected fallback to disable slot (a1=0), got %q", last)
+	}
 	if !strings.Contains(last, ",v1=0,") {
-		t.Errorf("expected fallback to zero (v1=0), got %q", last)
+		t.Errorf("expected v1=0 in fallback payload, got %q", last)
 	}
 }
 
@@ -414,8 +421,11 @@ func TestStep_PrometheusError_Fallback(t *testing.T) {
 		t.Fatal("expected fallback publish on prom error")
 	}
 	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("expected fallback to disable slot (a1=0), got %q", last)
+	}
 	if !strings.Contains(last, ",v1=0,") {
-		t.Errorf("expected fallback to v1=0, got %q", last)
+		t.Errorf("expected v1=0 in fallback payload, got %q", last)
 	}
 }
 
@@ -577,7 +587,131 @@ func TestStep_ExportFastPath_BypassesRampDown(t *testing.T) {
 	st.setFresh(freshDevStatus())
 	_ = c.Step(context.Background())
 	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("export fast-path: expected a1=0 (slot disabled), got %q", last)
+	}
 	if !strings.Contains(last, ",v1=0,") {
-		t.Errorf("export fast-path: expected v1=0 (bypass ramp-down), got %q", last)
+		t.Errorf("export fast-path: expected v1=0, got %q", last)
+	}
+}
+
+// ── MinOutputWatts tests ───────────────────────────────────────────────────
+
+// TestStep_MinOutputWatts_SnapsDeadZoneUp verifies that a computed target in
+// the 1..MinOutputWatts-1 dead zone is snapped up to MinOutputWatts.
+func TestStep_MinOutputWatts_SnapsDeadZoneUp(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// grid=130W, bias=100 → rawTarget=30W (inside 1..79 dead zone).
+	p.set(130, 0)
+	st.setFresh(freshDevStatus())
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.ImportBiasWatts = 100
+	cfg.MinOutputWatts = 80
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=1,") {
+		t.Errorf("expected a1=1 (slot enabled), got %q", last)
+	}
+	if !strings.Contains(last, ",v1=80,") {
+		t.Errorf("expected dead-zone snap-up to v1=80, got %q", last)
+	}
+}
+
+// TestStep_MinOutputWatts_ZeroTargetDisablesSlot verifies that a computed
+// target of exactly 0W produces a disabled slot (a1=0), not an enabled slot
+// with v=0 (which the device silently clamps to 80W).
+func TestStep_MinOutputWatts_ZeroTargetDisablesSlot(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// First step: establish a non-zero last command so delta > 0 on second step.
+	p.set(200, 0)
+	st.setFresh(freshDevStatus())
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+	_ = c.Step(context.Background())
+
+	// Second step: grid=0 → target=0 → slot should be disabled.
+	p.set(0, 0)
+	st.setFresh(freshDevStatus())
+	_ = c.Step(context.Background())
+
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("zero target must disable slot (a1=0), got %q", last)
+	}
+	if !strings.Contains(last, ",v1=0,") {
+		t.Errorf("expected v1=0 in payload, got %q", last)
+	}
+}
+
+// TestStep_RampDownAcrossDeadZone_JumpsToZero ensures that a slow ramp-down
+// which lands inside the dead zone (1..MinOutputWatts-1) collapses to 0 and
+// disables the slot, rather than publishing an unreachable wattage.
+func TestStep_RampDownAcrossDeadZone_JumpsToZero(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// Establish 120 W discharge.
+	p.set(120, 0)
+	st.setFresh(freshDevStatus())
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.RampUpWattsPerCycle = 800
+	cfg.RampDownWattsPerCycle = 50 // ramp-down would land at 120-50=70W (dead zone)
+	cfg.MinCommandDeltaWatts = 1
+	cfg.MinOutputWatts = 80
+	c := controller.New(cfg, p, pub, st, clk, nil)
+	_ = c.Step(context.Background()) // 120 W commanded
+
+	// Target drops to 0; ramp would give 70W but that's in the dead zone.
+	// Controller must jump to 0 and disable the slot.
+	p.set(0, 0)
+	st.setFresh(freshDevStatus())
+	_ = c.Step(context.Background())
+
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("ramp through dead zone: expected a1=0 (slot disabled), got %q", last)
+	}
+	if !strings.Contains(last, ",v1=0,") {
+		t.Errorf("ramp through dead zone: expected v1=0, got %q", last)
+	}
+}
+
+// TestStep_AboveMinOutputWatts_PassesThrough checks that a target at or above
+// MinOutputWatts is unchanged by the dead-zone logic.
+func TestStep_AboveMinOutputWatts_PassesThrough(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	p.set(200, 0) // rawTarget = 200W, well above 80W floor
+	st.setFresh(freshDevStatus())
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.MinOutputWatts = 80
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=1,") {
+		t.Errorf("expected a1=1 (slot enabled) for 200W target, got %q", last)
+	}
+	if !strings.Contains(last, ",v1=200,") {
+		t.Errorf("expected v1=200 unchanged, got %q", last)
 	}
 }

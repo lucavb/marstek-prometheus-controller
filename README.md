@@ -101,6 +101,7 @@ All settings are environment variables:
 | `RAMP_DOWN_WATTS_PER_CYCLE`   | `300`                      | Maximum discharge decrease per loop iteration (bypassed on active export — see [Control bias](#control-bias)) |
 | `MIN_COMMAND_DELTA_WATTS`     | `25`                       | Suppress commands smaller than this change                          |
 | `MIN_HOLD_TIME`               | `30s`                      | Minimum time between published commands                             |
+| `MIN_OUTPUT_WATTS`            | `80`                       | Lower clamp on non-zero slot power. The B2500 silently clamps `v=0..79` to 80 W on an enabled slot; any computed target in that range is snapped up to this value. A target of exactly 0 W disables the slot (`a<N>=0`) — the only real way to stop discharge. |
 | `MAX_OUTPUT_WATTS`            | `800`                      | Hard cap on slot power (device max is 800 W)                        |
 | `SCHEDULE_SLOT`               | `1`                        | Which timed-discharge slot to drive (1–5)                           |
 | `SCHEDULE_START`              | `00:00`                    | Slot start time written to the device                               |
@@ -179,6 +180,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `target_slot_power_watts`    | Gauge | Computed target before ramp/hold limits (W)                    |
 | `commanded_slot_power_watts` | Gauge | Last value published to the device (W)                         |
 | `slot_index`                 | Gauge | Slot being driven (1–5)                                        |
+| `min_output_watts`           | Gauge | Lower clamp on non-zero commanded slot power (W)               |
 | `max_output_watts`           | Gauge | Effective upper clamp (W)                                      |
 | `state`                      | Gauge | 0=starting, 1=idle, 2=discharging, 3=holding, 4=fallback       |
 | `info`                       | Gauge | Always 1; labels carry version, device_type, device_id, broker |

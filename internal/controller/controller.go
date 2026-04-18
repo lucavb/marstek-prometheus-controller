@@ -47,6 +47,7 @@ type Config struct {
 	RampDownWattsPerCycle int
 	MinCommandDeltaWatts  int
 	MinHoldTime           time.Duration
+	MinOutputWatts        int
 	MaxOutputWatts        int
 
 	// Schedule slot
@@ -93,10 +94,12 @@ func New(cfg Config, prom PromReader, pub Publisher, status StatusSource, clock 
 	}
 	if m != nil {
 		m.SlotIndex.Set(float64(cfg.ScheduleSlot))
+		m.MinOutputWatts.Set(float64(cfg.MinOutputWatts))
 		m.MaxOutputWatts.Set(float64(cfg.MaxOutputWatts))
 		m.SetState(metrics.StateStarting)
 	}
 	slog.Info("controller configured",
+		"min_output_watts", cfg.MinOutputWatts,
 		"max_output_watts", cfg.MaxOutputWatts,
 		"import_bias_watts", cfg.ImportBiasWatts,
 		"ramp_up_w_per_cycle", cfg.RampUpWattsPerCycle,
@@ -250,6 +253,11 @@ func (c *Controller) Step(ctx context.Context) error {
 	if rawTarget > c.cfg.MaxOutputWatts {
 		rawTarget = c.cfg.MaxOutputWatts
 	}
+	// Snap dead zone up: device silently clamps v=0..79 to 80W, so we must
+	// never target an unreachable wattage. Zero stays zero (stop = disable slot).
+	if rawTarget > 0 && rawTarget < c.cfg.MinOutputWatts {
+		rawTarget = c.cfg.MinOutputWatts
+	}
 
 	if c.m != nil {
 		c.m.TargetSlotPowerWatts.Set(float64(rawTarget))
@@ -263,6 +271,17 @@ func (c *Controller) Step(ctx context.Context) error {
 	// rawTarget (which is 0 once the bias is applied) regardless of ramp pace.
 	if smoothed < 0 && ramped > rawTarget {
 		ramped = rawTarget
+	}
+
+	// Collapse dead-zone values after ramping. If we're aiming for 0 and the
+	// ramp left us in 1..MinOutputWatts-1, jump to 0 (disable slot). If we're
+	// aiming for a positive value the ramp hasn't reached yet, hold at the floor.
+	if ramped > 0 && ramped < c.cfg.MinOutputWatts {
+		if rawTarget == 0 {
+			ramped = 0
+		} else {
+			ramped = c.cfg.MinOutputWatts
+		}
 	}
 
 	if abs(ramped-c.lastCommandWatts) < c.cfg.MinCommandDeltaWatts {
@@ -286,7 +305,9 @@ func (c *Controller) Step(ctx context.Context) error {
 	// ── 6. Publish the new schedule power ────────────────────────────────────
 	slots := marstek.SlotsAsWriteSlots(devStatus)
 	idx := c.cfg.ScheduleSlot - 1
-	slots[idx].Enabled = true
+	// ramped==0 means "stop discharge"; the device ignores v=0 on an enabled
+	// slot and clamps it to 80W, so we must disable the slot instead.
+	slots[idx].Enabled = ramped > 0
 	slots[idx].Start = c.cfg.ScheduleStart
 	slots[idx].End = c.cfg.ScheduleEnd
 	slots[idx].Watts = ramped
@@ -393,8 +414,10 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	if idx < 0 || idx > 4 {
 		idx = 0
 	}
+	// Disable the slot rather than sending Watts=0: the device silently clamps
+	// v=0 to 80W on an enabled slot, so Enabled=false is the only real stop.
 	slots[idx] = marstek.Slot{
-		Enabled: true,
+		Enabled: false,
 		Start:   c.cfg.ScheduleStart,
 		End:     c.cfg.ScheduleEnd,
 		Watts:   0,

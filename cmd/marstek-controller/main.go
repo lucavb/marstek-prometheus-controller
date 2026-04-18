@@ -109,6 +109,7 @@ func run() error {
 		RampDownWattsPerCycle: cfg.RampDownWattsPerCycle,
 		MinCommandDeltaWatts:  cfg.MinCommandDeltaWatts,
 		MinHoldTime:           cfg.MinHoldTime,
+		MinOutputWatts:        cfg.MinOutputWatts,
 		MaxOutputWatts:        cfg.MaxOutputWatts,
 		ControlTopic:          ctrlTopic,
 		ScheduleSlot:          cfg.ScheduleSlot,
