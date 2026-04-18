@@ -568,6 +568,78 @@ func TestStep_ImportBias_ZeroFloor(t *testing.T) {
 	}
 }
 
+// TestStep_ExportFastPath_BypassesHoldTime verifies that the export fast-path
+// skips MinHoldTime suppression when reducing the command — a slow hold-time
+// would leave the battery discharging into the grid for up to the hold window.
+func TestStep_ExportFastPath_BypassesHoldTime(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.RampUpWattsPerCycle = 800
+	cfg.RampDownWattsPerCycle = 800
+	cfg.MinCommandDeltaWatts = 1
+	cfg.MinHoldTime = 30 * time.Second
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// First step: establish 500 W discharge at time t=0.
+	p.set(500, 0)
+	st.setFresh(freshDevStatus())
+	_ = c.Step(context.Background())
+	if pub.count() != 1 {
+		t.Fatalf("expected initial publish, got %d", pub.count())
+	}
+
+	// Advance only 5 s — well within the 30 s hold time. Grid goes negative
+	// (exporting). Hold-time would normally suppress, but the fast-path must
+	// bypass it.
+	clk.advance(5 * time.Second)
+	p.set(-100, 0)
+	st.setFresh(freshDevStatus())
+	_ = c.Step(context.Background())
+
+	if pub.count() != 2 {
+		t.Fatalf("export fast-path must bypass hold time; expected second publish, got count=%d", pub.count())
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Errorf("export fast-path: expected slot disabled (a1=0,v1=0), got %q", last)
+	}
+}
+
+// TestStep_HoldTime_StillSuppresses_WhenNotExporting sanity-checks that the
+// new fast-path bypass does not leak into normal operation: positive grid
+// readings with a reduced target still respect MinHoldTime.
+func TestStep_HoldTime_StillSuppresses_WhenNotExporting(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.MinHoldTime = 30 * time.Second
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Establish 500 W.
+	p.set(500, 0)
+	st.setFresh(freshDevStatus())
+	_ = c.Step(context.Background())
+
+	// Within hold time, grid drops to 200 W (still importing, not exporting).
+	// We try to reduce to 200 W — hold-time must still suppress.
+	clk.advance(5 * time.Second)
+	p.set(200, 0)
+	st.setFresh(freshDevStatus())
+	countBefore := pub.count()
+	_ = c.Step(context.Background())
+
+	if pub.count() != countBefore {
+		t.Errorf("non-export hold-time suppression regressed: got %d publishes, want %d", pub.count(), countBefore)
+	}
+}
+
 func TestStep_ExportFastPath_BypassesRampDown(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}

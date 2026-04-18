@@ -279,7 +279,8 @@ func (c *Controller) Step(ctx context.Context) error {
 	// ramp-down limit must not slow our response — every watt still discharging
 	// is energy we are giving away and cannot recover.  Jump straight to the
 	// rawTarget (which is 0 once the bias is applied) regardless of ramp pace.
-	if smoothed < 0 && ramped > rawTarget {
+	exporting := smoothed < 0
+	if exporting && ramped > rawTarget {
 		ramped = rawTarget
 	}
 
@@ -303,7 +304,12 @@ func (c *Controller) Step(ctx context.Context) error {
 		return nil
 	}
 
-	if !c.lastCommandTime.IsZero() && now.Sub(c.lastCommandTime) < c.cfg.MinHoldTime {
+	// The export fast-path must remain truly immediate: if the grid is exporting
+	// and we are reducing the command, skip the hold-time suppression. Every
+	// extra second of discharge during export is energy we cannot recover.
+	holdTimeActive := !c.lastCommandTime.IsZero() && now.Sub(c.lastCommandTime) < c.cfg.MinHoldTime
+	fastPathBypass := exporting && ramped < c.lastCommandWatts
+	if holdTimeActive && !fastPathBypass {
 		if c.m != nil {
 			c.m.CommandSuppressedTotal.WithLabelValues("hold_time").Inc()
 			c.updateState(smoothed)
