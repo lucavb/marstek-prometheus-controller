@@ -76,6 +76,12 @@ type Controller struct {
 	lastCommandTime  time.Time
 	loggedFirmware   bool
 	ready            bool
+
+	// lastStatus caches the most recent successfully-read device status so that
+	// fallback() can preserve the user's other four schedule slots rather than
+	// wiping them to zero (see AGENTS.md "Preserve all five slots on every write").
+	lastStatus    marstek.Status
+	hasLastStatus bool
 }
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil
@@ -211,6 +217,9 @@ func (c *Controller) Step(ctx context.Context) error {
 	if c.m != nil {
 		c.m.LastStatusAgeSecs.Set(statusAge.Seconds())
 	}
+
+	c.lastStatus = devStatus
+	c.hasLastStatus = true
 
 	// One-time startup warnings.
 	if !c.loggedFirmware {
@@ -410,7 +419,14 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 		return nil
 	}
 
-	slots := marstek.SlotsAsWriteSlots(marstek.Status{})
+	// Prefer the last known device status so the other four schedule slots are
+	// preserved. Fall back to a zero status only if we have never successfully
+	// read one — in that edge case, we have nothing to preserve anyway.
+	base := marstek.Status{}
+	if c.hasLastStatus {
+		base = c.lastStatus
+	}
+	slots := marstek.SlotsAsWriteSlots(base)
 	idx := c.cfg.ScheduleSlot - 1
 	if idx < 0 || idx > 4 {
 		idx = 0

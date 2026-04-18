@@ -693,6 +693,74 @@ func TestStep_RampDownAcrossDeadZone_JumpsToZero(t *testing.T) {
 	}
 }
 
+// TestStep_Fallback_PreservesOtherSlots verifies that a fallback (triggered by
+// stale Prometheus) re-publishes slots 2–5 with the values the device last
+// reported, rather than wiping them to zero. Only the controlled slot is
+// disabled.
+func TestStep_Fallback_PreservesOtherSlots(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// Status with slot 3 enabled at 200 W and slot 5 enabled at 150 W.
+	custom := marstek.ParseStatus(
+		"pe=51,vv=110,sv=9,cs=0,o1=1,o2=1,g1=0,g2=0,md=0," +
+			"d1=1,e1=0:0,f1=23:59,h1=240," +
+			"d2=0,e2=0:0,f2=23:59,h2=80," +
+			"d3=1,e3=6:0,f3=22:0,h3=200," +
+			"d4=0,e4=0:0,f4=23:59,h4=80," +
+			"d5=1,e5=12:0,f5=18:0,h5=150,tc_dis=1",
+	)
+	st.setFresh(custom)
+	p.set(300, 0)
+
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.PrometheusStaleAfter = 30 * time.Second
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// First step: successful publish establishes lastCommandWatts > 0 and
+	// caches the device status for later fallback re-use.
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("initial Step() error = %v", err)
+	}
+
+	// Second step: serve a stale sample to force fallback.
+	p.set(300, 60*time.Second)
+	st.setFresh(custom)
+	countBefore := pub.count()
+	_ = c.Step(context.Background())
+
+	if pub.count() == countBefore {
+		t.Fatal("expected fallback publish on stale prometheus")
+	}
+	last := pub.last()
+	// Controlled slot (1) should be disabled.
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Errorf("expected controlled slot disabled (a1=0,v1=0), got %q", last)
+	}
+	// Slots 3 and 5 should be preserved.
+	if !strings.Contains(last, ",a3=1,") {
+		t.Errorf("expected slot 3 preserved as enabled (a3=1), got %q", last)
+	}
+	if !strings.Contains(last, ",v3=200,") {
+		t.Errorf("expected slot 3 watts preserved (v3=200), got %q", last)
+	}
+	if !strings.Contains(last, ",a5=1,") {
+		t.Errorf("expected slot 5 preserved as enabled (a5=1), got %q", last)
+	}
+	if !strings.Contains(last, ",v5=150,") && !strings.HasSuffix(last, ",v5=150") {
+		t.Errorf("expected slot 5 watts preserved (v5=150), got %q", last)
+	}
+	// Slots 2 and 4 were disabled in the status and should stay that way.
+	if !strings.Contains(last, ",a2=0,") || !strings.Contains(last, ",v2=80,") {
+		t.Errorf("expected slot 2 preserved disabled at 80 W, got %q", last)
+	}
+	if !strings.Contains(last, ",a4=0,") || !strings.Contains(last, ",v4=80,") {
+		t.Errorf("expected slot 4 preserved disabled at 80 W, got %q", last)
+	}
+}
+
 // TestStep_AboveMinOutputWatts_PassesThrough checks that a target at or above
 // MinOutputWatts is unchanged by the dead-zone logic.
 func TestStep_AboveMinOutputWatts_PassesThrough(t *testing.T) {
