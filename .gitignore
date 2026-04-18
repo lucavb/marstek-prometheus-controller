@@ -2,6 +2,6 @@ bin/
 tmp/
 dist/
 coverage.out
-marstek-controller
+/marstek-controller
 __pycache__/
 *.pyc
