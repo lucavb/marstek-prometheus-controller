@@ -71,6 +71,9 @@ func run() error {
 		OnReconnect: func() {
 			m.MQTTConnected.Set(1)
 		},
+		OnDisconnect: func() {
+			m.MQTTConnected.Set(0)
+		},
 		OnDrop: func(reason string) {
 			m.CommandSuppressedTotal.WithLabelValues(reason).Inc()
 		},

@@ -39,6 +39,9 @@ type Options struct {
 	// OnReconnect is called each time the client successfully (re)connects.
 	// It runs inside the OnConnect handler before re-subscriptions are issued.
 	OnReconnect func()
+	// OnDisconnect is called as soon as paho reports the connection lost, so
+	// metrics / readiness checks can react without waiting for a reconciler.
+	OnDisconnect func()
 	// OnDrop is called when a pending publish is replaced by a newer one.
 	OnDrop DropHandler
 }
@@ -129,6 +132,9 @@ func New(opts Options) (*Client, error) {
 	po.SetConnectionLostHandler(func(_ paho.Client, err error) {
 		c.connected.Store(0)
 		slog.Warn("mqtt: connection lost", "err", err)
+		if c.opts.OnDisconnect != nil {
+			c.opts.OnDisconnect()
+		}
 	})
 
 	c.paho = paho.NewClient(po)
