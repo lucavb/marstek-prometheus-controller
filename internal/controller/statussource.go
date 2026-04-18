@@ -70,8 +70,16 @@ func (s *MQTTStatusSource) LatestStatus() (marstek.Status, time.Time) {
 	return s.latest, s.receivedAt
 }
 
-// Poll publishes a cd=1 request and blocks until a status message arrives or
-// timeout elapses.
+// Poll publishes a cd=1 self-poll request and blocks until any status message
+// arrives on the device status topic, or the timeout elapses.
+//
+// Note: Poll does not correlate responses to the self-poll it just sent. The
+// device periodically broadcasts its own status independently of cd=1, and
+// any such message that arrives during the wait window will satisfy Poll
+// exactly as a direct reply would. The stale-drain at the top of Poll only
+// discards a message that was buffered before publishing, not one received
+// during the wait. Callers that need strict request/response correlation
+// should build it on top of this primitive.
 func (s *MQTTStatusSource) Poll(ctx context.Context, timeout time.Duration) (marstek.Status, error) {
 	// Drain any stale value in the channel before publishing.
 	select {
