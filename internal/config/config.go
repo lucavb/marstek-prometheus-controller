@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -174,29 +175,43 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// warnInvalid logs when an env var is set but not parseable. We keep the
+// permissive fallback-to-default behaviour for backward compatibility, but
+// make the bad value visible instead of silently swallowing it.
+func warnInvalid(key, value string, fallback any, err error) {
+	slog.Warn("config: invalid env var, using default",
+		"key", key, "value", value, "default", fallback, "err", err)
+}
+
 func getEnvInt(key string, fallback int) int {
 	if v, ok := os.LookupEnv(key); ok {
-		if n, err := strconv.Atoi(v); err == nil {
+		n, err := strconv.Atoi(v)
+		if err == nil {
 			return n
 		}
+		warnInvalid(key, v, fallback, err)
 	}
 	return fallback
 }
 
 func getEnvFloat(key string, fallback float64) float64 {
 	if v, ok := os.LookupEnv(key); ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
+		f, err := strconv.ParseFloat(v, 64)
+		if err == nil {
 			return f
 		}
+		warnInvalid(key, v, fallback, err)
 	}
 	return fallback
 }
 
 func getEnvDuration(key string, fallback time.Duration) time.Duration {
 	if v, ok := os.LookupEnv(key); ok {
-		if d, err := time.ParseDuration(v); err == nil {
+		d, err := time.ParseDuration(v)
+		if err == nil {
 			return d
 		}
+		warnInvalid(key, v, fallback, err)
 	}
 	return fallback
 }
@@ -207,6 +222,7 @@ func getEnvBool(key string, fallback bool) bool {
 		if err == nil {
 			return b
 		}
+		warnInvalid(key, v, fallback, err)
 	}
 	return fallback
 }
