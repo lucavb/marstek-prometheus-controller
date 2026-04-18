@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -149,15 +150,17 @@ func run() error {
 		slog.Warn("http shutdown error", "err", err)
 	}
 
+	// Give ListenAndServe a moment to return after Shutdown completes so any
+	// error is logged rather than dropped. Shutdown's own 5s cap bounds this.
 	select {
 	case err := <-httpErrCh:
 		if err != nil {
 			slog.Warn("http server error", "err", err)
 		}
-	default:
+	case <-time.After(1 * time.Second):
 	}
 
-	if ctrlErr != nil && ctrlErr != context.Canceled {
+	if ctrlErr != nil && !errors.Is(ctrlErr, context.Canceled) {
 		return ctrlErr
 	}
 	slog.Info("marstek-controller stopped cleanly")
