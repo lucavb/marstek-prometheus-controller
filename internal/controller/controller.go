@@ -240,13 +240,14 @@ func (c *Controller) Step(ctx context.Context) error {
 	}
 
 	// ── 4. Compute raw target ─────────────────────────────────────────────────
-	// Positive grid power = importing from grid → battery should discharge more.
-	// Negative grid power = exporting to grid → reduce battery discharge.
-	// ImportBiasWatts is subtracted so the setpoint always aims to leave a small
-	// deliberate import on the grid rather than driving to exact zero.  Exported
-	// energy cannot be recovered, so erring on the side of slight import is
-	// preferable to accidental export.
-	rawTarget := int(math.Round(smoothed)) - c.cfg.ImportBiasWatts
+	// The grid meter already reflects the battery's contribution, so using the
+	// raw grid reading as an absolute target causes the loop to converge to
+	// grid_ss = (load + bias)/2 rather than to bias.  The fix is to treat the
+	// grid error as a correction on top of what the device is currently
+	// delivering (g1+g2).  Fixed-point analysis: B_next = B + grid - k, solved
+	// at grid = k — the bias now does exactly what its name says.
+	currentOutput := devStatus.Output1Watts + devStatus.Output2Watts
+	rawTarget := currentOutput + int(math.Round(smoothed)) - c.cfg.ImportBiasWatts
 	if rawTarget < 0 {
 		rawTarget = 0
 	}

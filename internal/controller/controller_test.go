@@ -124,10 +124,13 @@ func (f *fakeClock) advance(d time.Duration) {
 // ── helpers ────────────────────────────────────────────────────────────────
 
 func freshDevStatus() marstek.Status {
-	// Mirrors the live device state seen in plan validation.
+	// g1=0,g2=0: device is not currently discharging. Tests that need a
+	// non-zero baseline must set Output1Watts/Output2Watts explicitly.
+	// Using zero output ensures rawTarget = 0 + grid - bias, keeping all
+	// single-step tests equivalent to the previous absolute formula.
 	s := marstek.ParseStatus(
 		"p1=1,p2=1,w1=375,w2=380,pe=51,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=90," +
-			"lv=240,cj=0,kn=1142,g1=120,g2=118,b1=0,b2=0,md=0," +
+			"lv=240,cj=0,kn=1142,g1=0,g2=0,b1=0,b2=0,md=0," +
 			"d1=1,e1=0:0,f1=23:59,h1=240,d2=0,e2=0:0,f2=23:59,h2=80," +
 			"d3=0,e3=0:0,f3=23:59,h3=80,d4=0,e4=0:0,f4=23:59,h4=80," +
 			"d5=0,e5=0:0,f5=23:59,h5=80,lmo=2045,lmi=1483,lmf=0,uv=107,sm=0,bn=0,ct_t=7,tc_dis=1",
@@ -180,7 +183,7 @@ func TestStep_GridImport_IncreasesSlotPower(t *testing.T) {
 	if last == "" {
 		t.Fatal("expected a publish, got none")
 	}
-	// bias=0 (zero value) → v1 = 200 - 0 = 200
+	// currentOutput=0 (g1=0,g2=0), bias=0 → v1 = 0 + 200 - 0 = 200
 	if !strings.Contains(last, ",v1=200,") {
 		t.Errorf("expected v1=200 in payload, got %q", last)
 	}
