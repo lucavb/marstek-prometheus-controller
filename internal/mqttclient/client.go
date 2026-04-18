@@ -2,13 +2,15 @@
 // a single-pending-publish queue, topic subscription, and connected-state
 // tracking suitable for the Marstek controller.
 //
-// Design constraints from the plan:
+// Design constraints:
 //   - Auto-reconnect + connect-retry so transient broker outages are healed silently.
 //   - Only one pending publish is queued during a disconnect; if a new one arrives
 //     the older pending write is dropped (suppressed) and replaced. This avoids
 //     stacking stale commands when the broker comes back.
 //   - Publish is fire-and-forget (no QoS 1/2) matching the device protocol.
-//   - Subscribe registers a callback for the device status topic.
+//   - Subscribe stores subscriptions on the Client; the OnConnect handler
+//     re-subscribes all of them on every (re)connect so CleanSession=true never
+//     silently drops topic registrations.
 package mqttclient
 
 import (
@@ -30,14 +32,21 @@ type DropHandler func(reason string)
 
 // Options configures the MQTT client.
 type Options struct {
-	BrokerURL  string
-	ClientID   string
-	Username   string
-	Password   string
-	// OnReconnect is called each time the client successfully reconnects.
+	BrokerURL string
+	ClientID  string
+	Username  string
+	Password  string
+	// OnReconnect is called each time the client successfully (re)connects.
+	// It runs inside the OnConnect handler before re-subscriptions are issued.
 	OnReconnect func()
 	// OnDrop is called when a pending publish is replaced by a newer one.
 	OnDrop DropHandler
+}
+
+// subscription holds one registered topic + its wrapped paho handler.
+type subscription struct {
+	topic   string
+	handler paho.MessageHandler
 }
 
 // Client is a thread-safe paho wrapper.
@@ -46,8 +55,9 @@ type Client struct {
 	paho    paho.Client
 	mu      sync.Mutex
 	pending *pendingPublish
+	subs    []subscription
 	// connected is 1 when the last connection callback fired, 0 otherwise.
-	connected atomic.Int32
+	connected  atomic.Int32
 	reconnects atomic.Int64
 }
 
@@ -89,14 +99,28 @@ func New(opts Options) (*Client, error) {
 		c.connected.Store(1)
 		c.reconnects.Add(1)
 		slog.Info("mqtt: connected", "broker", opts.BrokerURL)
-		if opts.OnReconnect != nil {
-			opts.OnReconnect()
+
+		// Notify caller (e.g. to update metrics).
+		if c.opts.OnReconnect != nil {
+			c.opts.OnReconnect()
 		}
-		// Drain any pending publish that queued during disconnect.
+
+		// Re-subscribe to all registered topics. With CleanSession=true the
+		// broker forgets subscriptions on disconnect, so we must restore them.
 		c.mu.Lock()
+		subsSnapshot := make([]subscription, len(c.subs))
+		copy(subsSnapshot, c.subs)
 		p := c.pending
 		c.pending = nil
 		c.mu.Unlock()
+
+		for _, s := range subsSnapshot {
+			if tok := c.paho.Subscribe(s.topic, 0, s.handler); tok.Wait() && tok.Error() != nil {
+				slog.Warn("mqtt: re-subscribe failed", "topic", s.topic, "err", tok.Error())
+			}
+		}
+
+		// Drain any pending publish that queued during disconnect.
 		if p != nil {
 			slog.Debug("mqtt: flushing pending publish after reconnect", "topic", p.topic)
 			c.paho.Publish(p.topic, 0, false, p.payload)
@@ -159,24 +183,34 @@ func (c *Client) Publish(topic, payload string) error {
 }
 
 // Subscribe registers handler to be called for every message on topic.
-// This should be called before or immediately after connection; paho re-subscribes
-// automatically on reconnect when CleanSession=true via the onConnect handler —
-// but we store the subscription so we can re-subscribe inside OnConnect.
+// The subscription is stored on the Client so that the OnConnect handler can
+// re-subscribe on every (re)connect — necessary because CleanSession=true means
+// the broker discards all subscriptions on disconnect.
+//
+// Calling Subscribe while already connected issues the paho Subscribe immediately
+// in addition to storing it. Calling it before connection defers the actual
+// paho Subscribe to the OnConnect handler.
+//
+// Registering the same topic twice replaces the previous handler.
 func (c *Client) Subscribe(topic string, handler MessageHandler) error {
 	wrap := func(_ paho.Client, msg paho.Message) {
 		handler(msg.Topic(), string(msg.Payload()))
 	}
 
-	// Store for re-subscription on reconnect.
-	originalOnConnect := c.opts.OnReconnect
-	c.opts.OnReconnect = func() {
-		if originalOnConnect != nil {
-			originalOnConnect()
-		}
-		if tok := c.paho.Subscribe(topic, 0, wrap); tok.Wait() && tok.Error() != nil {
-			slog.Warn("mqtt: re-subscribe failed", "topic", topic, "err", tok.Error())
+	// Store (or replace) the subscription so OnConnect can restore it.
+	c.mu.Lock()
+	replaced := false
+	for i, s := range c.subs {
+		if s.topic == topic {
+			c.subs[i].handler = wrap
+			replaced = true
+			break
 		}
 	}
+	if !replaced {
+		c.subs = append(c.subs, subscription{topic: topic, handler: wrap})
+	}
+	c.mu.Unlock()
 
 	if !c.IsConnected() {
 		slog.Debug("mqtt: subscribe deferred (not yet connected)", "topic", topic)
