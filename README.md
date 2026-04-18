@@ -147,7 +147,7 @@ PROMETHEUS_BASE_URL=http://prometheus:9090 \
 | -------------- | ------------------------------------------------------------------------------------------------ |
 | `GET /metrics` | Prometheus scrape endpoint (controller's own metrics)                                            |
 | `GET /healthz` | Liveness: always `200 ok` while the process is up                                                |
-| `GET /readyz`  | Readiness: `200 ok` once a Prometheus read and MQTT publish have both succeeded; `503` otherwise |
+| `GET /readyz`  | Readiness: `200 ok` once the controller has completed at least one full control step that successfully read Prometheus and observed a live device status over MQTT; `503` otherwise |
 
 
 ## Prometheus Integration

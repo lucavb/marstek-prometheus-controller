@@ -3,9 +3,12 @@
 //
 // /metrics  — Prometheus scrape endpoint backed by the controller's private registry.
 // /healthz  — Liveness: always 200 while the process is up.
-// /readyz   — Readiness: 200 once the controller has had at least one successful
-//             Prometheus query AND at least one successful MQTT publish or a
-//             connected MQTT session.
+// /readyz   — Readiness: 200 once the controller has completed at least one full
+//             control step that successfully read Prometheus AND observed a
+//             live device status from MQTT (which implies a connected broker
+//             session). A step that was legitimately suppressed by deadband,
+//             hold-time, or command-delta still counts, because those all
+//             happen after both Prom and MQTT health have been verified.
 package httpserver
 
 import (

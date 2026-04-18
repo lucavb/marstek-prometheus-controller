@@ -364,8 +364,12 @@ func (c *Controller) Step(ctx context.Context) error {
 	return nil
 }
 
-// Ready returns true once the controller has completed at least one successful
-// Prometheus read and one successful MQTT publish.
+// Ready returns true once the controller has completed at least one full
+// control step that successfully read Prometheus and observed a live device
+// status over MQTT. Steps suppressed by deadband, hold-time, or
+// command-delta still count because both dependency checks passed. An MQTT
+// publish is not required: the very first sample may legitimately be within
+// the deadband and suppress the write.
 func (c *Controller) Ready() bool {
 	return c.ready
 }
