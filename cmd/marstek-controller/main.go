@@ -105,6 +105,7 @@ func run() error {
 		StatusStaleAfter:      cfg.MQTTStatusStaleAfter,
 		StatusPollTimeout:     cfg.MQTTStatusPollTimeout,
 		StatusHardFailAfter:   cfg.MQTTStatusHardFailAfter,
+		DeviceID:              cfg.MarstekDeviceID,
 		ControlInterval:       cfg.ControlInterval,
 		SmoothingAlpha:        cfg.SmoothingAlpha,
 		DeadbandWatts:         cfg.DeadbandWatts,

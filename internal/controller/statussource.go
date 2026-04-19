@@ -53,6 +53,7 @@ func (s *MQTTStatusSource) HandleMessage(_, payload string) {
 
 	if s.m != nil {
 		s.m.MQTTStatusMessagesTotal.Inc()
+		s.m.DeviceLastStatusSecs.Set(0)
 		s.m.LastStatusAgeSecs.Set(0)
 	}
 

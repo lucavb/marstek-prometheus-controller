@@ -41,6 +41,7 @@ type Config struct {
 	StatusStaleAfter    time.Duration
 	StatusPollTimeout   time.Duration
 	StatusHardFailAfter time.Duration
+	DeviceID            string
 
 	// Control
 	ControlInterval       time.Duration
@@ -80,6 +81,7 @@ type Controller struct {
 	lastCommandTime  time.Time
 	loggedFirmware   bool
 	ready            bool
+	lastStatusWarnAt time.Time
 
 	// lastStatus caches the most recent successfully-read device status so that
 	// fallback() can preserve the user's other four schedule slots rather than
@@ -183,6 +185,20 @@ func (c *Controller) Step(ctx context.Context) error {
 	// ── 2. Obtain device status ───────────────────────────────────────────────
 	devStatus, statusReceivedAt := c.status.LatestStatus()
 	statusAge := now.Sub(statusReceivedAt)
+	statusWarnThreshold := c.cfg.StatusHardFailAfter / 2
+
+	if !statusReceivedAt.IsZero() && statusWarnThreshold > 0 && statusAge > statusWarnThreshold {
+		if c.lastStatusWarnAt.IsZero() || now.Sub(c.lastStatusWarnAt) >= time.Minute {
+			slog.Warn("device status has been silent for too long",
+				"device_id", c.cfg.DeviceID,
+				"status_silent_seconds", statusAge.Seconds(),
+				"warn_after_seconds", statusWarnThreshold.Seconds(),
+				"hard_fail_after_seconds", c.cfg.StatusHardFailAfter.Seconds())
+			c.lastStatusWarnAt = now
+		}
+	} else {
+		c.lastStatusWarnAt = time.Time{}
+	}
 
 	if statusReceivedAt.IsZero() || statusAge > c.cfg.StatusStaleAfter {
 		label := "status_stale"
@@ -219,6 +235,7 @@ func (c *Controller) Step(ctx context.Context) error {
 	}
 
 	if c.m != nil {
+		c.m.DeviceLastStatusSecs.Set(statusAge.Seconds())
 		c.m.LastStatusAgeSecs.Set(statusAge.Seconds())
 	}
 

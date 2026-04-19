@@ -195,6 +195,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `prometheus_up`                             | Gauge | 1 if last query was fresh, 0 if stale or errored |
 | `last_prometheus_success_timestamp_seconds` | Gauge | Unix timestamp of last successful query          |
 | `last_mqtt_publish_timestamp_seconds`       | Gauge | Unix timestamp of last successful publish        |
+| `device_last_status_seconds`                | Gauge | Seconds since the last device status message     |
 | `last_status_age_seconds`                   | Gauge | Seconds since last device status message         |
 
 
@@ -238,6 +239,11 @@ groups:
         annotations:
           summary: "Marstek controller is in fallback mode"
 
+      - alert: MarsitekControllerDeviceStatusSilent
+        expr: marstek_controller_device_last_status_seconds > 300
+        annotations:
+          summary: "Marstek controller has not received device status for 5 minutes"
+
       - alert: MarsitekControllerAtCap
         expr: marstek_controller_commanded_slot_power_watts >= marstek_controller_max_output_watts
         for: 30m
@@ -257,6 +263,54 @@ does not need to track this.
 values. The controlled slot's power is the only thing that changes.
 - **Propagation latency**: writes take 5–15 s to take effect. `MIN_HOLD_TIME`
 (default 30 s) ensures commands don't stack.
+
+## Troubleshooting
+
+### Device disappears from Wi-Fi and stops responding
+
+One failure mode for the Marstek battery is a broken WPA2 4-way handshake loop
+inside the device firmware. On the AP this shows up as repeated
+`AP-STA-POSSIBLE-PSK-MISMATCH` lines for the battery MAC, followed much later
+by a single successful `EAPOL-4WAY-HS-COMPLETED`.
+
+This matches known ESP-IDF Wi-Fi bugs:
+
+- [espressif/esp-idf#6920](https://github.com/espressif/esp-idf/issues/6920)
+- [espressif/esp-idf#7286](https://github.com/espressif/esp-idf/issues/7286)
+- [raspberrypi/linux#6975](https://github.com/raspberrypi/linux/issues/6975)
+
+Observed characteristics:
+
+- The battery is **not** fully dead during the outage; it is repeatedly
+  authenticating and associating, but failing the WPA2 key handshake.
+- RF is usually fine. In the investigated case the AP saw about `-53 dBm`,
+  which rules out poor signal as the primary cause.
+- The device may self-recover after roughly 10-15 minutes. Re-entering the
+  Wi-Fi config in the Marstek app over BLE shortcuts that loop by forcing a
+  fresh association.
+
+Mitigation used in this repo's deployment:
+
+- Put the battery on its own dedicated 2.4 GHz SSID
+- Keep it on the existing IoT VLAN/network
+- Use `psk2`
+- Set `wpa_group_rekey = 86400`
+- Set `wpa_disable_eapol_key_retries = true`
+- Force `ieee80211w = "0"`
+
+The point of the dedicated SSID is to scope these more permissive settings to
+the single misbehaving client instead of weakening the shared IoT SSID for
+everyone else.
+
+### What to watch
+
+- `marstek_controller_device_last_status_seconds` should normally stay low and
+  grow only briefly during transient MQTT or Wi-Fi gaps.
+- A sustained climb past half of `MQTT_STATUS_HARD_FAIL_AFTER` triggers a
+  throttled warning log. Past the full `MQTT_STATUS_HARD_FAIL_AFTER` threshold,
+  the controller falls back to zero discharge.
+- Cheap IoT Wi-Fi stacks often drop or delay ICMP even when application traffic
+  is fine, so packet loss alone is not enough evidence of RF trouble.
 
 ## Logging / Loki
 

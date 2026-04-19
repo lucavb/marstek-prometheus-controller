@@ -36,6 +36,7 @@ type Metrics struct {
 	PrometheusUp                       prometheus.Gauge
 	LastPrometheusSuccessTimestampSecs prometheus.Gauge
 	LastMQTTPublishTimestampSecs       prometheus.Gauge
+	DeviceLastStatusSecs               prometheus.Gauge
 	LastStatusAgeSecs                  prometheus.Gauge
 
 	// Activity (counters)
@@ -128,6 +129,7 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		PrometheusUp:                       newGauge("prometheus_up", "1 if the last Prometheus query succeeded within the staleness window, 0 otherwise."),
 		LastPrometheusSuccessTimestampSecs: newGauge("last_prometheus_success_timestamp_seconds", "Unix timestamp of the last successful Prometheus query."),
 		LastMQTTPublishTimestampSecs:       newGauge("last_mqtt_publish_timestamp_seconds", "Unix timestamp of the last successful MQTT publish."),
+		DeviceLastStatusSecs:               newGauge("device_last_status_seconds", "Seconds since the last device status message was received."),
 		LastStatusAgeSecs:                  newGauge("last_status_age_seconds", "Seconds since the last device status message was received."),
 
 		PrometheusQueriesTotal:  newCounter("prometheus_queries_total", "Total number of Prometheus instant queries executed."),
