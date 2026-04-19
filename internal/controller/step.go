@@ -1,0 +1,288 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"math"
+	"time"
+
+	"github.com/lucavb/marstek-prometheus-controller/internal/marstek"
+	"github.com/lucavb/marstek-prometheus-controller/internal/metrics"
+)
+
+// Step executes one control-loop iteration. It is exported for testing.
+func (c *Controller) Step(ctx context.Context) error {
+	start := c.clock.Now()
+	if c.m != nil {
+		c.m.ControlCyclesTotal.Inc()
+		defer func() {
+			c.m.ControlLoopDurationSecs.Observe(time.Since(start).Seconds())
+		}()
+	}
+
+	// ── 1. Read grid power from Prometheus ───────────────────────────────────
+	if c.m != nil {
+		c.m.PrometheusQueriesTotal.Inc()
+	}
+	sample, promErr := c.prom.Query(ctx)
+	if promErr != nil {
+		slog.Warn("prometheus query failed", "err", promErr)
+		if c.m != nil {
+			c.m.PrometheusErrorsTotal.WithLabelValues(classifyPromError(promErr)).Inc()
+			c.m.PrometheusUp.Set(0)
+		}
+		return c.fallback(ctx, "prometheus_error")
+	}
+
+	now := c.clock.Now()
+	if now.Sub(sample.SampleTime) > c.cfg.PrometheusStaleAfter {
+		slog.Warn("prometheus sample is stale",
+			"age", now.Sub(sample.SampleTime).Round(time.Second),
+			"threshold", c.cfg.PrometheusStaleAfter)
+		if c.m != nil {
+			c.m.PrometheusErrorsTotal.WithLabelValues("stale").Inc()
+			c.m.PrometheusUp.Set(0)
+		}
+		return c.fallback(ctx, "prometheus_stale")
+	}
+
+	if c.m != nil {
+		c.m.GridPowerWatts.Set(sample.Watts)
+		c.m.RecordLastPrometheusSuccess(now)
+	}
+
+	// ── 2. Obtain device status ───────────────────────────────────────────────
+	devStatus, statusReceivedAt := c.status.LatestStatus()
+	statusAge := now.Sub(statusReceivedAt)
+	statusWarnThreshold := c.cfg.StatusHardFailAfter / 2
+
+	if !statusReceivedAt.IsZero() && statusWarnThreshold > 0 && statusAge > statusWarnThreshold {
+		if c.lastStatusWarnAt.IsZero() || now.Sub(c.lastStatusWarnAt) >= time.Minute {
+			slog.Warn("device status has been silent for too long",
+				"device_id", c.cfg.DeviceID,
+				"status_silent_seconds", statusAge.Seconds(),
+				"warn_after_seconds", statusWarnThreshold.Seconds(),
+				"hard_fail_after_seconds", c.cfg.StatusHardFailAfter.Seconds())
+			c.lastStatusWarnAt = now
+		}
+	} else {
+		c.lastStatusWarnAt = time.Time{}
+	}
+
+	if statusReceivedAt.IsZero() || statusAge > c.cfg.StatusStaleAfter {
+		label := "status_stale"
+		if statusReceivedAt.IsZero() {
+			label = "no_status_yet"
+			slog.Info("no device status yet, issuing self-poll")
+		} else {
+			slog.Warn("device status stale, issuing self-poll", "age", statusAge.Round(time.Second))
+		}
+		if c.m != nil {
+			c.m.SelfPollsTotal.Inc()
+			c.m.MQTTPublishesTotal.WithLabelValues("self_poll").Inc()
+		}
+		polled, err := c.status.Poll(ctx, c.cfg.StatusPollTimeout)
+		if err != nil {
+			slog.Warn("self-poll failed", "err", err)
+			if !statusReceivedAt.IsZero() && statusAge > c.cfg.StatusHardFailAfter {
+				slog.Error("device status hard fail, falling back to zero discharge",
+					"age", statusAge.Round(time.Second))
+				return c.fallback(ctx, "mqtt_status_stale")
+			}
+			// Freeze control at last commanded value until status returns.
+			if c.m != nil {
+				c.m.CommandSuppressedTotal.WithLabelValues("status_stale").Inc()
+				c.m.SetState(metrics.StateHolding)
+			}
+			slog.Warn("freezing control until device status returns",
+				"label", label, "last_command_watts", c.lastCommandWatts)
+			return nil
+		}
+		devStatus = polled
+		statusReceivedAt = now
+		statusAge = 0
+	}
+
+	if c.m != nil {
+		c.m.DeviceLastStatusSecs.Set(statusAge.Seconds())
+		c.m.LastStatusAgeSecs.Set(statusAge.Seconds())
+	}
+
+	c.lastStatus = devStatus
+	c.hasLastStatus = true
+
+	// ── 2a. SoC soft floor — don't fight the BMS ─────────────────────────────
+	// Derive the soft floor from the device's own DoD setting so a change in
+	// the Marstek app flows through automatically without a redeploy.
+	softFloor := c.cfg.BatterySoCFloorFallbackPercent
+	if devStatus.DoDPercent > 0 {
+		softFloor = (100 - devStatus.DoDPercent) + c.cfg.BatterySoCFloorMarginPercent
+	}
+	resumeAt := softFloor + c.cfg.BatterySoCHysteresisPercent
+
+	if c.m != nil {
+		c.m.BatterySoCPercent.Set(float64(devStatus.SOCPercent))
+		c.m.BatterySoCSoftFloorPercent.Set(float64(softFloor))
+		c.m.BatteryTempMinCelsius.Set(float64(devStatus.TempMinC))
+		c.m.BatteryTempMaxCelsius.Set(float64(devStatus.TempMaxC))
+	}
+
+	if devStatus.SOCPercent <= softFloor {
+		c.socFloorActive = true
+	} else if devStatus.SOCPercent >= resumeAt {
+		c.socFloorActive = false
+	}
+
+	// One-time startup warnings — logged as soon as we have valid status,
+	// before the SoC floor check so they appear even when discharge is suppressed.
+	if !c.loggedFirmware {
+		c.loggedFirmware = true
+		slog.Info("device status received",
+			"firmware", fmt.Sprintf("%d.%d", devStatus.FirmwareMajor, devStatus.FirmwareSub),
+			"soc_pct", devStatus.SOCPercent,
+			"rated_output_w", devStatus.RatedOutputWatts,
+			"charging_mode", devStatus.ChargingMode,
+			"o1", devStatus.Output1Enabled, "o2", devStatus.Output2Enabled,
+			"surplus_feed_in", devStatus.SurplusFeedIn)
+		if devStatus.ChargingMode != 0 {
+			slog.Warn("device is NOT in simultaneous charge+discharge mode (cs!=0); zero-export control may be ineffective")
+		}
+		if devStatus.Output1Enabled == 0 && devStatus.Output2Enabled == 0 {
+			slog.Warn("both output ports are disabled; discharge commands will produce 0 W until outputs are enabled")
+		}
+		if devStatus.SurplusFeedIn {
+			slog.Warn("surplus feed-in is enabled; this may interfere with zero-export control")
+		}
+	}
+
+	if c.socFloorActive {
+		slog.Debug("soc below soft floor, suppressing discharge",
+			"soc_pct", devStatus.SOCPercent,
+			"soft_floor_pct", softFloor,
+			"resume_at_pct", resumeAt,
+			"dod_pct", devStatus.DoDPercent)
+		// Both Prometheus and device status are healthy; we're just choosing not
+		// to discharge. Mark ready so the readiness probe reflects that the
+		// controller is operating normally (same logic as deadband suppression).
+		c.ready = true
+		return c.commandZero(ctx, now, devStatus)
+	}
+
+	// ── 3. Smooth the grid power signal ──────────────────────────────────────
+	smoothed := c.smooth(sample.Watts)
+	if c.m != nil {
+		c.m.SmoothedGridPowerWatts.Set(smoothed)
+	}
+
+	// ── 4. Compute raw target ─────────────────────────────────────────────────
+	// The grid meter already reflects the battery's contribution, so using the
+	// raw grid reading as an absolute target causes the loop to converge to
+	// grid_ss = (load + bias)/2 rather than to bias.  The fix is to treat the
+	// grid error as a correction on top of what the device is currently
+	// delivering (g1+g2).  Fixed-point analysis: B_next = B + grid - k, solved
+	// at grid = k — the bias now does exactly what its name says.
+	currentOutput := devStatus.Output1Watts + devStatus.Output2Watts
+	rawTarget := currentOutput + int(math.Round(smoothed)) - c.cfg.ImportBiasWatts
+	if rawTarget < 0 {
+		rawTarget = 0
+	}
+	if rawTarget > c.cfg.MaxOutputWatts {
+		rawTarget = c.cfg.MaxOutputWatts
+	}
+	// Snap dead zone up: device silently clamps v=0..79 to 80W, so we must
+	// never target an unreachable wattage. Zero stays zero (stop = disable slot).
+	if rawTarget > 0 && rawTarget < c.cfg.MinOutputWatts {
+		rawTarget = c.cfg.MinOutputWatts
+	}
+
+	if c.m != nil {
+		c.m.TargetSlotPowerWatts.Set(float64(rawTarget))
+	}
+
+	// ── 5. Apply ramp and hold-time suppression ───────────────────────────────
+	ramped := c.applyRamp(c.lastCommandWatts, rawTarget)
+	// Export fast-path: if the grid is currently exporting (smoothed < 0) the
+	// ramp-down limit must not slow our response — every watt still discharging
+	// is energy we are giving away and cannot recover.  Jump straight to the
+	// rawTarget (which is 0 once the bias is applied) regardless of ramp pace.
+	exporting := smoothed < 0
+	if exporting && ramped > rawTarget {
+		ramped = rawTarget
+	}
+
+	// Collapse dead-zone values after ramping. If we're aiming for 0 and the
+	// ramp left us in 1..MinOutputWatts-1, jump to 0 (disable slot). If we're
+	// aiming for a positive value the ramp hasn't reached yet, hold at the floor.
+	if ramped > 0 && ramped < c.cfg.MinOutputWatts {
+		if rawTarget == 0 {
+			ramped = 0
+		} else {
+			ramped = c.cfg.MinOutputWatts
+		}
+	}
+
+	if abs(ramped-c.lastCommandWatts) < c.cfg.MinCommandDeltaWatts {
+		if c.m != nil {
+			c.m.CommandSuppressedTotal.WithLabelValues("delta").Inc()
+			c.updateState(smoothed)
+		}
+		c.ready = true
+		return nil
+	}
+
+	// The export fast-path must remain truly immediate: if the grid is exporting
+	// and we are reducing the command, skip the hold-time suppression. Every
+	// extra second of discharge during export is energy we cannot recover.
+	holdTimeActive := !c.lastCommandTime.IsZero() && now.Sub(c.lastCommandTime) < c.cfg.MinHoldTime
+	fastPathBypass := exporting && ramped < c.lastCommandWatts
+	if holdTimeActive && !fastPathBypass {
+		if c.m != nil {
+			c.m.CommandSuppressedTotal.WithLabelValues("hold_time").Inc()
+			c.updateState(smoothed)
+		}
+		c.ready = true
+		return nil
+	}
+
+	// ── 6. Publish the new schedule power ────────────────────────────────────
+	slots := marstek.SlotsAsWriteSlots(devStatus)
+	idx := c.cfg.ScheduleSlot - 1
+	// ramped==0 means "stop discharge"; the device ignores v=0 on an enabled
+	// slot and clamps it to 80W, so we must disable the slot instead.
+	slots[idx].Enabled = ramped > 0
+	slots[idx].Start = c.cfg.ScheduleStart
+	slots[idx].End = c.cfg.ScheduleEnd
+	slots[idx].Watts = ramped
+
+	payload := marstek.BuildTimedDischargePayload(slots, c.cfg.PersistToFlash)
+	slog.Debug("publishing schedule update",
+		"slot", c.cfg.ScheduleSlot, "watts", ramped,
+		"prev_watts", c.lastCommandWatts, "payload", payload)
+
+	if err := c.pub.Publish(c.cfg.ControlTopic, payload); err != nil {
+		slog.Warn("mqtt publish failed", "err", err)
+		if c.m != nil {
+			c.m.MQTTPublishErrorsTotal.WithLabelValues(classifyMQTTError(err)).Inc()
+			c.m.CommandSuppressedTotal.WithLabelValues("disconnected").Inc()
+		}
+		return err
+	}
+
+	c.lastCommandWatts = ramped
+	c.lastCommandTime = now
+	if c.m != nil {
+		c.m.CommandedSlotPowerWatts.Set(float64(ramped))
+		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
+		c.m.RecordLastMQTTPublish(now)
+		c.updateState(smoothed)
+	}
+	c.ready = true
+
+	slog.Info("schedule updated",
+		"slot", c.cfg.ScheduleSlot, "watts", ramped,
+		"grid_w", math.Round(sample.Watts),
+		"smoothed_w", math.Round(smoothed),
+		"soc_pct", devStatus.SOCPercent)
+	return nil
+}
