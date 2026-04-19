@@ -302,6 +302,10 @@ func (c *Controller) Step(ctx context.Context) error {
 			"soft_floor_pct", softFloor,
 			"resume_at_pct", resumeAt,
 			"dod_pct", devStatus.DoDPercent)
+		// Both Prometheus and device status are healthy; we're just choosing not
+		// to discharge. Mark ready so the readiness probe reflects that the
+		// controller is operating normally (same logic as deadband suppression).
+		c.ready = true
 		return c.commandZero(ctx, now, devStatus)
 	}
 

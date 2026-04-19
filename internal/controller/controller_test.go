@@ -1099,6 +1099,34 @@ func TestStep_SoCFloor_ExportFastPath_StillZeros(t *testing.T) {
 	}
 }
 
+// TestStep_SoCFloor_SetsReady verifies that the controller reports Ready()=true
+// after a step where the SoC soft floor suppresses discharge. Both Prometheus
+// and device status were successfully obtained, so the readiness probe must
+// return 200 even though no discharge command was issued.
+func TestStep_SoCFloor_SetsReady(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// SoC=13 < soft floor=22 (DoD=80): SoC floor active from the first step.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(13, 80))
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if c.Ready() {
+		t.Fatal("controller must not be ready before first step")
+	}
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if !c.Ready() {
+		t.Error("controller must be ready after a step where Prometheus and device status were both healthy, even if SoC floor suppressed discharge")
+	}
+}
+
 // TestStep_DeviceStatusLogged_WhenSoCFloorActive verifies that the one-time
 // "device status received" info log fires on the first step that yields a valid
 // device status, even when the SoC soft floor immediately suppresses discharge
