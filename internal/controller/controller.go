@@ -63,6 +63,12 @@ type Config struct {
 
 	// Flash writes
 	PersistToFlash bool
+
+	// Battery SoC soft floor — prevents commanding discharge when the BMS will
+	// gate us anyway (see AGENTS.md "Don't fight the BMS").
+	BatterySoCFloorMarginPercent   int
+	BatterySoCHysteresisPercent    int
+	BatterySoCFloorFallbackPercent int
 }
 
 // Controller is the main control loop.
@@ -88,6 +94,10 @@ type Controller struct {
 	// wiping them to zero (see AGENTS.md "Preserve all five slots on every write").
 	lastStatus    marstek.Status
 	hasLastStatus bool
+
+	// socFloorActive is true while SoC is below the derived soft floor.
+	// It stays true until SoC climbs back above (softFloor + hysteresis).
+	socFloorActive bool
 }
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil
@@ -241,6 +251,37 @@ func (c *Controller) Step(ctx context.Context) error {
 
 	c.lastStatus = devStatus
 	c.hasLastStatus = true
+
+	// ── 2a. SoC soft floor — don't fight the BMS ─────────────────────────────
+	// Derive the soft floor from the device's own DoD setting so a change in
+	// the Marstek app flows through automatically without a redeploy.
+	softFloor := c.cfg.BatterySoCFloorFallbackPercent
+	if devStatus.DoDPercent > 0 {
+		softFloor = (100 - devStatus.DoDPercent) + c.cfg.BatterySoCFloorMarginPercent
+	}
+	resumeAt := softFloor + c.cfg.BatterySoCHysteresisPercent
+
+	if c.m != nil {
+		c.m.BatterySoCPercent.Set(float64(devStatus.SOCPercent))
+		c.m.BatterySoCSoftFloorPercent.Set(float64(softFloor))
+		c.m.BatteryTempMinCelsius.Set(float64(devStatus.TempMinC))
+		c.m.BatteryTempMaxCelsius.Set(float64(devStatus.TempMaxC))
+	}
+
+	if devStatus.SOCPercent <= softFloor {
+		c.socFloorActive = true
+	} else if devStatus.SOCPercent >= resumeAt {
+		c.socFloorActive = false
+	}
+
+	if c.socFloorActive {
+		slog.Debug("soc below soft floor, suppressing discharge",
+			"soc_pct", devStatus.SOCPercent,
+			"soft_floor_pct", softFloor,
+			"resume_at_pct", resumeAt,
+			"dod_pct", devStatus.DoDPercent)
+		return c.commandZero(ctx, now, devStatus)
+	}
 
 	// One-time startup warnings.
 	if !c.loggedFirmware {
@@ -491,6 +532,52 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 		c.m.CommandedSlotPowerWatts.Set(0)
 		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
 		c.m.RecordLastMQTTPublish(c.lastCommandTime)
+	}
+	return nil
+}
+
+// commandZero disables the controlled slot and sets state to idle. It is used
+// when the SoC soft floor is active to avoid publishing commands that the BMS
+// will silently gate. Unlike fallback(), it increments CommandSuppressedTotal
+// rather than FallbackTotal, and it always preserves the other four slots from
+// the freshly-read devStatus (not the cached lastStatus).
+func (c *Controller) commandZero(ctx context.Context, now time.Time, devStatus marstek.Status) error {
+	if c.m != nil {
+		c.m.CommandSuppressedTotal.WithLabelValues("soc_floor").Inc()
+		c.m.SetState(metrics.StateIdle)
+	}
+
+	if c.lastCommandWatts == 0 {
+		return nil
+	}
+
+	slots := marstek.SlotsAsWriteSlots(devStatus)
+	idx := c.cfg.ScheduleSlot - 1
+	slots[idx] = marstek.Slot{
+		Enabled: false,
+		Start:   c.cfg.ScheduleStart,
+		End:     c.cfg.ScheduleEnd,
+		Watts:   0,
+	}
+
+	payload := marstek.BuildTimedDischargePayload(slots, false)
+	if err := c.pub.Publish(c.cfg.ControlTopic, payload); err != nil {
+		slog.Warn("commandZero publish failed", "err", err)
+		if c.m != nil {
+			c.m.MQTTPublishErrorsTotal.WithLabelValues(classifyMQTTError(err)).Inc()
+		}
+		return err
+	}
+
+	slog.Info("soc floor: disabled discharge slot",
+		"slot", c.cfg.ScheduleSlot,
+		"prev_watts", c.lastCommandWatts)
+	c.lastCommandWatts = 0
+	c.lastCommandTime = now
+	if c.m != nil {
+		c.m.CommandedSlotPowerWatts.Set(0)
+		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
+		c.m.RecordLastMQTTPublish(now)
 	}
 	return nil
 }

@@ -111,6 +111,9 @@ All settings are environment variables:
 | `LOG_FORMAT`                  | `text`                     | `text` or `json`                                                    |
 | `PERSIST_TO_FLASH`            | `false`                    | Write to persistent flash (`cd=7`) instead of volatile (`cd=20`)    |
 | `ALLOW_FLASH_WRITES`          | `false`                    | Must be `true` to enable `PERSIST_TO_FLASH` (foot-gun guard)        |
+| `BATTERY_SOC_FLOOR_MARGIN_PERCENT` | `2`               | Added to `(100 − device DoD%)` to derive the controller SoC soft floor. When SoC falls at or below this floor, discharge is suppressed until SoC recovers by `BATTERY_SOC_HYSTERESIS_PERCENT`. |
+| `BATTERY_SOC_HYSTERESIS_PERCENT`   | `5`               | Hysteresis band above the soft floor; discharge only resumes once SoC ≥ `(soft_floor + hysteresis)`. Prevents rapid on/off cycling near the floor. |
+| `BATTERY_SOC_FLOOR_FALLBACK_PERCENT` | `15`            | Absolute SoC floor used when the device status does not report a DoD value (`do=0`). |
 
 
 ## Deployment
@@ -184,6 +187,10 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `max_output_watts`           | Gauge | Effective upper clamp (W)                                      |
 | `state`                      | Gauge | 0=starting, 1=idle, 2=discharging, 3=holding, 4=fallback       |
 | `info`                       | Gauge | Always 1; labels carry version, device_type, device_id, broker |
+| `battery_soc_percent`        | Gauge | Device-reported battery SoC (%) as seen by the controller      |
+| `battery_soc_soft_floor_percent` | Gauge | Derived SoC soft floor: `(100−DoD)+margin`. Discharge is suppressed below this value. |
+| `battery_temp_min_celsius`   | Gauge | Device-reported minimum cell temperature (°C); observability only |
+| `battery_temp_max_celsius`   | Gauge | Device-reported maximum cell temperature (°C); observability only |
 
 
 **Dependency health**
@@ -212,7 +219,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `mqtt_status_messages_total`    | Counter   |          | Total device status messages received                                                     |
 | `self_polls_total`              | Counter   |          | Times the controller self-polled (status was stale)                                       |
 | `control_cycles_total`          | Counter   |          | Total control loop iterations                                                             |
-| `command_suppressed_total`      | Counter   | `reason` | Suppressed commands (deadband, delta, hold_time, disconnected, status_stale)              |
+| `command_suppressed_total`      | Counter   | `reason` | Suppressed commands (deadband, delta, hold_time, disconnected, status_stale, soc_floor)   |
 | `fallback_total`                | Counter   | `reason` | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error) |
 | `control_loop_duration_seconds` | Histogram |          | Wall time per control cycle                                                               |
 

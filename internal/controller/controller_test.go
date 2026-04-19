@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -830,6 +831,270 @@ func TestStep_Fallback_PreservesOtherSlots(t *testing.T) {
 	}
 	if !strings.Contains(last, ",a4=0,") || !strings.Contains(last, ",v4=80,") {
 		t.Errorf("expected slot 4 preserved disabled at 80 W, got %q", last)
+	}
+}
+
+// ── SoC soft floor tests ───────────────────────────────────────────────────
+
+// devStatusWithSoC builds a minimal device status with the given SoC and DoD.
+func devStatusWithSoC(socPct, dodPct int) marstek.Status {
+	return marstek.ParseStatus(
+		"p1=1,p2=1,w1=0,w2=0,pe=" + itoa(socPct) + ",vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=" + itoa(dodPct) + "," +
+			"lv=240,cj=0,kn=500,g1=0,g2=0,b1=0,b2=0,md=0," +
+			"d1=1,e1=0:0,f1=23:59,h1=240,d2=0,e2=0:0,f2=23:59,h2=80," +
+			"d3=0,e3=0:0,f3=23:59,h3=80,d4=0,e4=0:0,f4=23:59,h4=80," +
+			"d5=0,e5=0:0,f5=23:59,h5=80,lmo=2045,lmi=1483,lmf=0,uv=107,sm=0,bn=0,ct_t=7,tc_dis=1",
+	)
+}
+
+func itoa(n int) string {
+	return fmt.Sprintf("%d", n)
+}
+
+// socFloorCfg returns a defaultCfg with explicit SoC floor settings.
+// margin=2, hysteresis=5, fallback=15.
+func socFloorCfg(ctrl, start, end string) controller.Config {
+	cfg := defaultCfg(ctrl, start, end)
+	cfg.BatterySoCFloorMarginPercent = 2
+	cfg.BatterySoCHysteresisPercent = 5
+	cfg.BatterySoCFloorFallbackPercent = 15
+	return cfg
+}
+
+// TestStep_SoCFloor_AboveFloor_PublishesNormally verifies that when SoC is
+// well above the soft floor, the controller publishes a normal discharge command.
+func TestStep_SoCFloor_AboveFloor_PublishesNormally(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// DoD=80 → floor = (100-80)+2 = 22; SoC=51 is well above floor.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(51, 80))
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if pub.count() == 0 {
+		t.Fatal("expected a publish, got none")
+	}
+	if !strings.Contains(pub.last(), ",v1=200,") {
+		t.Errorf("expected v1=200, got %q", pub.last())
+	}
+}
+
+// TestStep_SoCFloor_AtFloor_DisablesSlot verifies that when SoC drops to/below
+// the soft floor after a prior discharge command, the controller publishes a
+// disable-slot write.
+func TestStep_SoCFloor_AtFloor_DisablesSlot(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	// DoD=80 → floor = 22, resume = 27.
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Step 1: SoC=51, establish 200 W discharge.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(51, 80))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step 1 error = %v", err)
+	}
+	countAfterStep1 := pub.count()
+	if countAfterStep1 == 0 {
+		t.Fatal("expected publish in step 1")
+	}
+
+	// Step 2: SoC drops to 22 (== floor) → commandZero must fire.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(22, 80))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step 2 error = %v", err)
+	}
+	if pub.count() <= countAfterStep1 {
+		t.Fatal("expected commandZero publish when SoC hits soft floor")
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Errorf("expected slot disabled (a1=0,v1=0), got %q", last)
+	}
+}
+
+// TestStep_SoCFloor_Hysteresis_StaysAtZero verifies that once the SoC floor
+// is active, the controller stays at 0 W while SoC is between the floor and
+// (floor + hysteresis).
+func TestStep_SoCFloor_Hysteresis_StaysAtZero(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	// DoD=80 → floor=22, resume=27.
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Establish non-zero command.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(51, 80))
+	_ = c.Step(context.Background())
+
+	// SoC drops to floor → activate.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(22, 80))
+	_ = c.Step(context.Background())
+
+	// SoC recovers to 24 — above floor but below resume (27) → must stay suppressed.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(24, 80))
+	countBefore := pub.count()
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step error = %v", err)
+	}
+	// commandZero skips publish if lastCommandWatts==0, so count stays the same.
+	if pub.count() != countBefore {
+		t.Errorf("expected no additional publish in hysteresis band, got %d new publishes", pub.count()-countBefore)
+	}
+}
+
+// TestStep_SoCFloor_Hysteresis_ResumesAboveResumeAt verifies that normal
+// discharge resumes once SoC climbs above (floor + hysteresis).
+func TestStep_SoCFloor_Hysteresis_ResumesAboveResumeAt(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	// DoD=80 → floor=22, resume=27.
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Step 1: establish discharge.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(51, 80))
+	_ = c.Step(context.Background())
+
+	// Step 2: hit the floor.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(22, 80))
+	_ = c.Step(context.Background())
+
+	// Step 3: SoC climbs to 27 (== resume) → normal discharge must resume.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(27, 80))
+	countBefore := pub.count()
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step error = %v", err)
+	}
+	if pub.count() <= countBefore {
+		t.Fatal("expected discharge to resume once SoC reaches resumeAt")
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=1,") {
+		t.Errorf("expected slot re-enabled (a1=1) on resume, got %q", last)
+	}
+}
+
+// TestStep_SoCFloor_DoDZero_UsesFallback verifies that when DoDPercent is 0
+// (protocol field missing), the controller uses BatterySoCFloorFallbackPercent.
+func TestStep_SoCFloor_DoDZero_UsesFallback(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	// Fallback=15, hysteresis=5 → floor=15, resume=20.
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Step 1: establish discharge at SoC=50, DoD=0 (unknown).
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(50, 0))
+	_ = c.Step(context.Background())
+
+	// Step 2: SoC=14 (below fallback floor of 15) → suppress.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(14, 0))
+	countBefore := pub.count()
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step error = %v", err)
+	}
+	if pub.count() <= countBefore {
+		t.Fatal("expected disable-slot publish when SoC below fallback floor")
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Errorf("expected slot disabled (a1=0,v1=0), got %q", last)
+	}
+}
+
+// TestStep_SoCFloor_DoDChanges_NewFloorApplied verifies that if DoDPercent
+// changes between cycles (user adjusted in the Marstek app), the new soft
+// floor is computed on the next cycle.
+func TestStep_SoCFloor_DoDChanges_NewFloorApplied(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Step 1: DoD=90 → floor=(100-90)+2=12, resume=17. SoC=51 → normal.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(51, 90))
+	_ = c.Step(context.Background())
+
+	// Step 2: DoD changes to 80 → floor now 22. SoC=20 is below new floor.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(20, 80))
+	countBefore := pub.count()
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step error = %v", err)
+	}
+	if pub.count() <= countBefore {
+		t.Fatal("expected suppress with new DoD floor applied immediately")
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("expected slot disabled after DoD change raised the floor, got %q", last)
+	}
+}
+
+// TestStep_SoCFloor_ExportFastPath_StillZeros verifies that the export
+// fast-path and SoC floor both result in 0 W / disabled slot, and that the
+// SoC floor does not interfere with the export counter path.
+func TestStep_SoCFloor_ExportFastPath_StillZeros(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	cfg.RampUpWattsPerCycle = 800
+	cfg.RampDownWattsPerCycle = 800
+	cfg.MinCommandDeltaWatts = 1
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Step 1: establish 200 W discharge, SoC=51.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(51, 80))
+	_ = c.Step(context.Background())
+
+	// Step 2: grid is exporting AND SoC is at the floor.
+	// Both paths agree on 0 W — just verify no panic and slot disabled.
+	p.set(-100, 0)
+	st.setFresh(devStatusWithSoC(22, 80))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step error = %v", err)
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Errorf("expected slot disabled when exporting and at SoC floor, got %q", last)
 	}
 }
 

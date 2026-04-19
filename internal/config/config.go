@@ -56,6 +56,13 @@ type Config struct {
 	ScheduleSlot  int    // 1–5
 	ScheduleStart string // HH:MM
 	ScheduleEnd   string // HH:MM
+
+	// Battery SoC soft floor — prevents commanding discharge when the BMS will
+	// gate us anyway. Derived at runtime from devStatus.DoDPercent; these env
+	// vars tune the margin and hysteresis around that derived value.
+	BatterySoCFloorMarginPercent   int // added to (100 − DoDPercent); default 2
+	BatterySoCHysteresisPercent    int // resume SoC = soft floor + this; default 5
+	BatterySoCFloorFallbackPercent int // used when DoDPercent is 0/unknown; default 15
 }
 
 // Load reads all configuration from environment variables and returns a
@@ -99,6 +106,10 @@ func Load() (Config, error) {
 		ScheduleSlot:  getEnvInt("SCHEDULE_SLOT", 1),
 		ScheduleStart: getEnv("SCHEDULE_START", "00:00"),
 		ScheduleEnd:   getEnv("SCHEDULE_END", "23:59"),
+
+		BatterySoCFloorMarginPercent:   getEnvInt("BATTERY_SOC_FLOOR_MARGIN_PERCENT", 2),
+		BatterySoCHysteresisPercent:    getEnvInt("BATTERY_SOC_HYSTERESIS_PERCENT", 5),
+		BatterySoCFloorFallbackPercent: getEnvInt("BATTERY_SOC_FLOOR_FALLBACK_PERCENT", 15),
 	}
 
 	return cfg, cfg.validate()
@@ -155,6 +166,15 @@ func (c *Config) validate() error {
 	if c.MinHoldTime < c.ControlInterval {
 		// Warn in log rather than hard-fail; set to one control interval minimum.
 		c.MinHoldTime = c.ControlInterval
+	}
+	if c.BatterySoCFloorMarginPercent < 0 || c.BatterySoCFloorMarginPercent > 30 {
+		errs = append(errs, "BATTERY_SOC_FLOOR_MARGIN_PERCENT must be 0–30")
+	}
+	if c.BatterySoCHysteresisPercent < 1 || c.BatterySoCHysteresisPercent > 20 {
+		errs = append(errs, "BATTERY_SOC_HYSTERESIS_PERCENT must be 1–20")
+	}
+	if c.BatterySoCFloorFallbackPercent < 5 || c.BatterySoCFloorFallbackPercent > 50 {
+		errs = append(errs, "BATTERY_SOC_FLOOR_FALLBACK_PERCENT must be 5–50")
 	}
 
 	if len(errs) > 0 {

@@ -121,6 +121,10 @@ func run() error {
 		ScheduleStart:         cfg.ScheduleStart,
 		ScheduleEnd:           cfg.ScheduleEnd,
 		PersistToFlash:        cfg.PersistToFlash,
+
+		BatterySoCFloorMarginPercent:   cfg.BatterySoCFloorMarginPercent,
+		BatterySoCHysteresisPercent:    cfg.BatterySoCHysteresisPercent,
+		BatterySoCFloorFallbackPercent: cfg.BatterySoCFloorFallbackPercent,
 	}
 
 	ctrl := controller.New(ctrlCfg, prom, mqtt, statusSrc, nil, m)

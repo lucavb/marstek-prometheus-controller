@@ -53,6 +53,12 @@ type Metrics struct {
 
 	// Performance (histogram)
 	ControlLoopDurationSecs prometheus.Histogram
+
+	// Battery state (gauges) — sourced from device status, not the Prometheus exporter
+	BatterySoCPercent          prometheus.Gauge // device-reported SoC (pe)
+	BatterySoCSoftFloorPercent prometheus.Gauge // derived soft floor: (100−DoD)+margin
+	BatteryTempMinCelsius      prometheus.Gauge // device-reported min cell temp (tl); observability only
+	BatteryTempMaxCelsius      prometheus.Gauge // device-reported max cell temp (th); observability only
 }
 
 // New creates a Metrics instance with a fresh private registry, all instruments
@@ -142,6 +148,11 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		ControlCyclesTotal:      newCounter("control_cycles_total", "Total number of control loop iterations executed."),
 		CommandSuppressedTotal:  newCounterVec("command_suppressed_total", "Commands not published, by suppression reason.", []string{"reason"}),
 		FallbackTotal:           newCounterVec("fallback_total", "Fallback events by reason.", []string{"reason"}),
+
+		BatterySoCPercent:          newGauge("battery_soc_percent", "Device-reported battery state of charge (%)."),
+		BatterySoCSoftFloorPercent: newGauge("battery_soc_soft_floor_percent", "Controller-derived SoC soft floor: (100−DoDPercent)+margin. Discharge is suppressed below this value."),
+		BatteryTempMinCelsius:      newGauge("battery_temp_min_celsius", "Device-reported minimum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
+		BatteryTempMaxCelsius:      newGauge("battery_temp_max_celsius", "Device-reported maximum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
 
 		ControlLoopDurationSecs: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace:   ns,

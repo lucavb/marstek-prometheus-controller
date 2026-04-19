@@ -159,17 +159,24 @@ battery).
 ### Always do
 
 - ✅ Keep `cd=20` (volatile) as the default write kind. `cd=7` writes to
-flash and is wear-limited.
+  flash and is wear-limited.
 - ✅ Preserve all five slots on every write — only the controlled slot's
-power changes. See `internal/controller` and `internal/marstek`.
+  power changes. See `internal/controller` and `internal/marstek`.
 - ✅ Clamp commanded power to `[0, MAX_OUTPUT_WATTS]` with 800 W as the hard
-ceiling (device limit).
+  ceiling (device limit).
 - ✅ Drop to 0 W immediately when grid is exporting (the export fast-path
-that bypasses `RAMP_DOWN_WATTS_PER_CYCLE`).
+  that bypasses `RAMP_DOWN_WATTS_PER_CYCLE`).
 - ✅ Fall back to zero discharge on any of: Prometheus stale, MQTT
-disconnected, status silent beyond `MQTT_STATUS_HARD_FAIL_AFTER`.
+  disconnected, status silent beyond `MQTT_STATUS_HARD_FAIL_AFTER`.
 - ✅ Treat `MIN_OUTPUT_WATTS=80` as a floor on non-zero commands (device
-silently clamps 1–79 → 80). Only exact 0 disables the slot.
+  silently clamps 1–79 → 80). Only exact 0 disables the slot.
+- ✅ **Don't fight the BMS.** When SoC is below the soft floor derived from
+  `devStatus.DoDPercent`, go explicitly idle (disable the slot) rather than
+  publishing commands the BMS will silently gate. Derive the floor from
+  `(100 − DoDPercent) + BATTERY_SOC_FLOOR_MARGIN_PERCENT` so a DoD change
+  in the Marstek app flows through automatically without a redeploy. Read
+  SoC from `devStatus` (MQTT status), never from Prometheus — the exporter
+  is a separate concern.
 
 ### Ask first
 
@@ -218,5 +225,9 @@ round-trip test in `protocol_test.go`.
 - **"Debug the real device"** → use `tools/marstek-probe/mqtt_control.py`;
 don't write new Go throwaway code for this.
 - **"Reproduce an incident"** → write a table-driven test against
-`controller.Step` with fake `PromReader` / `Publisher` / `StatusSource`.
+  `controller.Step` with fake `PromReader` / `Publisher` / `StatusSource`.
+- **"Change SoC floor behavior"** → tweak `BATTERY_SOC_FLOOR_MARGIN_PERCENT`
+  or `BATTERY_SOC_HYSTERESIS_PERCENT` in `internal/config/config.go`, then
+  extend the `TestStep_SoCFloor_*` table tests in
+  `internal/controller/controller_test.go`. Do not read SoC from Prometheus.
 
