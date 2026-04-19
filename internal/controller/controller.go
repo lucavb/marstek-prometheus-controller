@@ -274,16 +274,8 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.socFloorActive = false
 	}
 
-	if c.socFloorActive {
-		slog.Debug("soc below soft floor, suppressing discharge",
-			"soc_pct", devStatus.SOCPercent,
-			"soft_floor_pct", softFloor,
-			"resume_at_pct", resumeAt,
-			"dod_pct", devStatus.DoDPercent)
-		return c.commandZero(ctx, now, devStatus)
-	}
-
-	// One-time startup warnings.
+	// One-time startup warnings — logged as soon as we have valid status,
+	// before the SoC floor check so they appear even when discharge is suppressed.
 	if !c.loggedFirmware {
 		c.loggedFirmware = true
 		slog.Info("device status received",
@@ -302,6 +294,15 @@ func (c *Controller) Step(ctx context.Context) error {
 		if devStatus.SurplusFeedIn {
 			slog.Warn("surplus feed-in is enabled; this may interfere with zero-export control")
 		}
+	}
+
+	if c.socFloorActive {
+		slog.Debug("soc below soft floor, suppressing discharge",
+			"soc_pct", devStatus.SOCPercent,
+			"soft_floor_pct", softFloor,
+			"resume_at_pct", resumeAt,
+			"dod_pct", devStatus.DoDPercent)
+		return c.commandZero(ctx, now, devStatus)
 	}
 
 	// ── 3. Smooth the grid power signal ──────────────────────────────────────

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -1095,6 +1096,40 @@ func TestStep_SoCFloor_ExportFastPath_StillZeros(t *testing.T) {
 	last := pub.last()
 	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
 		t.Errorf("expected slot disabled when exporting and at SoC floor, got %q", last)
+	}
+}
+
+// TestStep_DeviceStatusLogged_WhenSoCFloorActive verifies that the one-time
+// "device status received" info log fires on the first step that yields a valid
+// device status, even when the SoC soft floor immediately suppresses discharge
+// and commandZero() returns early.  Before the fix, loggedFirmware was never
+// set when socFloorActive was true, so the message was silently dropped.
+func TestStep_DeviceStatusLogged_WhenSoCFloorActive(t *testing.T) {
+	// Capture slog output for the duration of this test.
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// SoC=13 < soft floor=22 (DoD=80 → (100-80)+2=22): floor is active from
+	// the very first step, so commandZero returns early.
+	p.set(200, 0)
+	st.setFresh(devStatusWithSoC(13, 80))
+
+	cfg := socFloorCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "device status received") {
+		t.Errorf("expected 'device status received' log on first valid status even when SoC floor suppresses discharge\nlog output:\n%s", buf.String())
 	}
 }
 
