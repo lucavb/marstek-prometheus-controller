@@ -225,7 +225,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		polled, err := c.status.Poll(ctx, c.cfg.StatusPollTimeout)
 		if err != nil {
 			slog.Warn("self-poll failed", "err", err)
-			if statusAge > c.cfg.StatusHardFailAfter {
+			if !statusReceivedAt.IsZero() && statusAge > c.cfg.StatusHardFailAfter {
 				slog.Error("device status hard fail, falling back to zero discharge",
 					"age", statusAge.Round(time.Second))
 				return c.fallback(ctx, "mqtt_status_stale")

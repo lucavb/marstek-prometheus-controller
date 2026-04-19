@@ -1098,6 +1098,75 @@ func TestStep_SoCFloor_ExportFastPath_StillZeros(t *testing.T) {
 	}
 }
 
+// TestStep_NoStatus_PollFails_FreezesControl verifies that when the controller
+// has never received a device status (receivedAt is the zero value) and the
+// self-poll also times out, Step freezes at the last commanded wattage rather
+// than hard-failing to zero discharge. This is the startup regression: the raw
+// statusAge overflows int64 and saturates to MaxInt64, which was incorrectly
+// treated as "too old" and triggered an immediate hard-fail.
+func TestStep_NoStatus_PollFails_FreezesControl(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{} // receivedAt is time.Time{} — never set
+	clk := &fakeClock{now: time.Now()}
+
+	p.set(300, 0)
+	st.pollErr = errors.New("statussource: poll timeout after 5s")
+
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() must not hard-fail on first startup: got err = %v", err)
+	}
+	if pub.count() != 0 {
+		t.Errorf("expected no publish during freeze, got %d", pub.count())
+	}
+}
+
+// TestStep_StaleStatus_PollFails_HardFails verifies that when a previously-seen
+// device status has gone silent beyond StatusHardFailAfter and the self-poll also
+// fails, the controller falls back to zero discharge. This is the legitimate
+// hard-fail path that must still work after the startup fix.
+func TestStep_StaleStatus_PollFails_HardFails(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	// Step 1: healthy state — establishes a non-zero lastCommandWatts so
+	// fallback() will actually publish a zero-discharge command.
+	p.set(300, 0)
+	st.setFresh(freshDevStatus())
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("initial Step() error = %v", err)
+	}
+	countAfterStep1 := pub.count()
+	if countAfterStep1 == 0 {
+		t.Fatal("expected initial publish")
+	}
+
+	// Step 2: move receivedAt 10 min into the past (> StatusHardFailAfter=5min)
+	// and make Poll() fail — must trigger hard-fail fallback.
+	st.setStale()
+	st.pollErr = errors.New("statussource: poll timeout after 5s")
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() returned unexpected error = %v", err)
+	}
+	if pub.count() <= countAfterStep1 {
+		t.Fatal("expected fallback publish when stale beyond StatusHardFailAfter and poll fails")
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") {
+		t.Errorf("expected fallback to disable slot (a1=0), got %q", last)
+	}
+	if !strings.Contains(last, ",v1=0,") {
+		t.Errorf("expected v1=0 in fallback payload, got %q", last)
+	}
+}
+
 // TestStep_AboveMinOutputWatts_PassesThrough checks that a target at or above
 // MinOutputWatts is unchanged by the dead-zone logic.
 func TestStep_AboveMinOutputWatts_PassesThrough(t *testing.T) {
