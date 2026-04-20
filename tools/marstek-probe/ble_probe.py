@@ -6,19 +6,29 @@
 #     "bleak>=0.22",
 # ]
 # ///
-"""Bluetooth LE diagnostic probe for Marstek B2500 and Hame-protocol siblings.
+"""Bluetooth LE diagnostic + config tool for Marstek B2500 and Hame-protocol siblings.
 
 This is the BLE counterpart to `probe.py`. The B2500-D ignores the Venus UDP
 Local API, but it exposes a BLE GATT interface that is well-documented in the
 tomquist/hmjs project and is the canonical way to configure these devices
-locally. We scan for advertising HM_ devices, connect, and send three
-read-only commands to capture device info, runtime state, and cell info.
+locally.
+
+Subcommands:
+    probe       scan + connect + send three read-only commands (DEVICE_INFO,
+                RUNTIME_INFO, CELL_INFO). Default if none given.
+    set-wifi    point the battery at an SSID/password (equivalent to the
+                Marstek app's WiFi setup step). Use this to recover a device
+                stuck in a WPA2 MIC-failure loop without opening the app.
+    set-mqtt    point the battery at a custom MQTT broker.
+    reset-mqtt  reset MQTT config back to the Marstek cloud.
 
 Run it while physically near the battery (~10 m line of sight).
 
 Usage:
     uv run tools/marstek-probe/ble_probe.py
     uv run tools/marstek-probe/ble_probe.py --scan-timeout 15 --address AA:BB:CC:DD:EE:FF
+    uv run tools/marstek-probe/ble_probe.py set-wifi --ssid my-iot --password 'hunter2'
+    MARSTEK_WIFI_PASSWORD='hunter2' uv run tools/marstek-probe/ble_probe.py set-wifi --ssid my-iot
 
 Protocol reference:
 - hmjs GATT UUIDs:      https://github.com/tomquist/hmjs/blob/main/packages/ble/src/BLEDeviceManager.ts
@@ -31,7 +41,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
+import os
 import re
 import sys
 import time
@@ -78,6 +90,15 @@ def build_mqtt_config_payload(
     sep = MQTT_FIELD_SEPARATOR
     cfg = f"{ssl_flag}{sep}{host}{sep}{port}{sep}{username}{sep}{password}{sep}"
     return cfg.encode("utf-8")
+
+
+def build_wifi_config_payload(ssid: str, password: str) -> bytes:
+    """Match hmjs createWifiConfigPayload exactly: ssid<.,.>password (no trailing separator)."""
+    if not ssid or not password:
+        raise ValueError("SSID and password are required")
+    if MQTT_FIELD_SEPARATOR in ssid or MQTT_FIELD_SEPARATOR in password:
+        raise ValueError(f"SSID/password must not contain the separator {MQTT_FIELD_SEPARATOR!r}")
+    return f"{ssid}{MQTT_FIELD_SEPARATOR}{password}".encode("utf-8")
 
 NAME_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^HM[_\-A-Z0-9]", re.IGNORECASE),
@@ -621,6 +642,72 @@ async def run_set_mqtt(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def resolve_wifi_password(args: argparse.Namespace, console: Console) -> str | None:
+    """Pick the WiFi password from --password, MARSTEK_WIFI_PASSWORD env, or tty prompt."""
+    if args.password:
+        return args.password
+    env = os.environ.get("MARSTEK_WIFI_PASSWORD")
+    if env:
+        return env
+    if sys.stdin.isatty():
+        try:
+            return getpass.getpass("WiFi password: ") or None
+        except (EOFError, KeyboardInterrupt):
+            console.print("[red]aborted[/red]")
+            return None
+    console.print(
+        "[red]no WiFi password provided (pass --password, set MARSTEK_WIFI_PASSWORD, or run on a tty)[/red]"
+    )
+    return None
+
+
+async def run_set_wifi(args: argparse.Namespace, console: Console) -> int:
+    password = resolve_wifi_password(args, console)
+    if not password:
+        return 1
+
+    try:
+        payload = build_wifi_config_payload(args.ssid, password)
+    except ValueError as exc:
+        console.print(f"[red]invalid WiFi config: {exc}[/red]")
+        return 1
+
+    target, _ = await select_target(args, console)
+    if target is None:
+        console.print("[red]No candidate BLE device found.[/red]")
+        return 1
+
+    console.print(
+        f"\n[bold]Target:[/bold] {target.name or '<unknown>'} ({target.address}) rssi={target.rssi}"
+    )
+    console.print(
+        f"[dim]Config payload:[/dim] ssid={args.ssid!r} password=(set, {len(password)} chars)"
+    )
+    console.print(
+        "[yellow]Warning:[/yellow] an incorrect SSID or password will drop the battery off WiFi "
+        "and you'll need to re-run this command (BLE still works) to recover."
+    )
+
+    ok, runtime, err = await send_write_and_readback(
+        target.address,
+        CMD_SET_WIFI,
+        payload,
+        "SET_WIFI (0x05)",
+        console,
+        args.cmd_timeout,
+    )
+    if not ok:
+        console.print(f"[red]SET_WIFI failed: {err}[/red]")
+        return 2
+    print_mqtt_state(console, runtime, "After SET_WIFI:")
+    console.print(
+        "[dim]Note: wifi_connected may take up to ~30 s to flip to true while the "
+        "device re-associates. MQTT will reconnect after that. Rerun "
+        "`ble_probe.py probe` in a minute to confirm.[/dim]"
+    )
+    return 0
+
+
 async def run_reset_mqtt(args: argparse.Namespace, console: Console) -> int:
     target, _ = await select_target(args, console)
     if target is None:
@@ -724,6 +811,18 @@ def main() -> int:
     p_reset = sub.add_parser("reset-mqtt", help="reset the battery's MQTT config back to Marstek cloud")
     _add_common_ble_args(p_reset)
 
+    p_wifi = sub.add_parser(
+        "set-wifi",
+        help="point the battery at a WiFi SSID/password via BLE (equivalent to the app's WiFi config step)",
+    )
+    _add_common_ble_args(p_wifi)
+    p_wifi.add_argument("--ssid", required=True, help="target WiFi SSID (2.4 GHz, WPA2)")
+    p_wifi.add_argument(
+        "--password",
+        default="",
+        help="WiFi password. If omitted, falls back to MARSTEK_WIFI_PASSWORD env var, then a tty prompt.",
+    )
+
     args = parser.parse_args()
     if args.cmd is None:
         args = parser.parse_args(["probe", *sys.argv[1:]])
@@ -737,6 +836,9 @@ def main() -> int:
         if args.cmd == "reset-mqtt":
             console.rule("Marstek BLE: RESET_MQTT")
             return asyncio.run(run_reset_mqtt(args, console))
+        if args.cmd == "set-wifi":
+            console.rule("Marstek BLE: SET_WIFI")
+            return asyncio.run(run_set_wifi(args, console))
 
         console.rule("Marstek BLE probe")
         report = asyncio.run(run(args, console))

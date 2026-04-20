@@ -61,6 +61,12 @@ and drops directly to the computed target (0 W) in a single step when export is
 detected. The ramp-down limit still applies when reducing during positive-grid
 operation.
 
+The same fast-path logic applies to `MIN_HOLD_TIME` and the min-delta gate: both use
+`MIN_COMMAND_DELTA_WATTS_EXPORTING` (default `5` W) rather than the non-export
+`MIN_COMMAND_DELTA_WATTS` (default `25` W) when the smoothed grid is negative,
+so small export-driven reductions are never swallowed while the battery is
+giving energy away.
+
 ## Prerequisites
 
 1. Your B2500 is configured to connect to a local MQTT broker — see the
@@ -99,7 +105,8 @@ All settings are environment variables:
 | `IMPORT_BIAS_WATTS`           | `50`                       | Deliberate grid-import headroom; subtracted from the raw target so the battery always leaves this much import rather than driving to exact zero (see [Control bias](#control-bias)) |
 | `RAMP_UP_WATTS_PER_CYCLE`     | `150`                      | Maximum discharge increase per loop iteration; `0` = unlimited      |
 | `RAMP_DOWN_WATTS_PER_CYCLE`   | `300`                      | Maximum discharge decrease per loop iteration; `0` = unlimited. Bypassed on active export — see [Control bias](#control-bias). Bypassed on active export also skips `MIN_HOLD_TIME` for that cycle. |
-| `MIN_COMMAND_DELTA_WATTS`     | `25`                       | Suppress commands smaller than this change                          |
+| `MIN_COMMAND_DELTA_WATTS`     | `25`                       | Suppress writes where the change vs. the last command is smaller than this value (applies when smoothed grid >= 0, i.e. importing or idle). |
+| `MIN_COMMAND_DELTA_WATTS_EXPORTING` | `5`               | Same idea but applied when the smoothed grid is negative (exporting). Defaults to `5` so 1–4 W meter noise around zero does not republish the same schedule, while still responding aggressively to real export events. Set to `0` to never filter during export. |
 | `MIN_HOLD_TIME`               | `30s`                      | Minimum time between published commands                             |
 | `MIN_OUTPUT_WATTS`            | `80`                       | Lower clamp on non-zero slot power. The B2500 silently clamps `v=0..79` to 80 W on an enabled slot; any computed target in that range is snapped up to this value. A target of exactly 0 W disables the slot (`a<N>=0`) — the only real way to stop discharge. |
 | `MAX_OUTPUT_WATTS`            | `800`                      | Hard cap on slot power (device max is 800 W)                        |
@@ -277,8 +284,9 @@ values. The controlled slot's power is the only thing that changes.
 
 One failure mode for the Marstek battery is a broken WPA2 4-way handshake loop
 inside the device firmware. On the AP this shows up as repeated
-`AP-STA-POSSIBLE-PSK-MISMATCH` lines for the battery MAC, followed much later
-by a single successful `EAPOL-4WAY-HS-COMPLETED`.
+`AP-STA-POSSIBLE-PSK-MISMATCH` lines for the battery MAC and **no**
+corresponding `EAPOL-4WAY-HS-COMPLETED` — the device re-authenticates and
+re-associates every ~7 s but never completes the key handshake.
 
 This matches known ESP-IDF Wi-Fi bugs:
 
@@ -286,28 +294,54 @@ This matches known ESP-IDF Wi-Fi bugs:
 - [espressif/esp-idf#7286](https://github.com/espressif/esp-idf/issues/7286)
 - [raspberrypi/linux#6975](https://github.com/raspberrypi/linux/issues/6975)
 
-Observed characteristics:
+Observed characteristics (firmware `110.9` on the `HMJ-2` / B2500-D):
 
 - The battery is **not** fully dead during the outage; it is repeatedly
   authenticating and associating, but failing the WPA2 key handshake.
-- RF is usually fine. In the investigated case the AP saw about `-53 dBm`,
-  which rules out poor signal as the primary cause.
-- The device may self-recover after roughly 10-15 minutes. Re-entering the
-  Wi-Fi config in the Marstek app over BLE shortcuts that loop by forcing a
-  fresh association.
+- RF is fine. In the investigated case the AP saw about `-53 dBm`, which rules
+  out poor signal as the primary cause.
+- The device does **not** self-recover within any reasonable window. Measured:
+  **405** `AP-STA-POSSIBLE-PSK-MISMATCH` attempts, **0** successful handshakes,
+  and 7 deauthentications over 60 min on a dedicated SSID.
+- The PSK is correct; the same PSK works on other devices on the same SSID,
+  and works for this device immediately after either recovery step below.
 
-Mitigation used in this repo's deployment:
+AP-side mitigations that were tried and do **not** prevent the lockup (they
+were kept for hygiene but the device still enters the loop regardless):
 
 - Put the battery on its own dedicated 2.4 GHz SSID
 - Keep it on the existing IoT VLAN/network
-- Use `psk2`
-- Set `wpa_group_rekey = 86400`
-- Set `wpa_disable_eapol_key_retries = true`
-- Force `ieee80211w = "0"`
+- Use `psk2` with `wpa_group_rekey = 86400`, `wpa_disable_eapol_key_retries = true`,
+  and `ieee80211w = "0"`
 
 The point of the dedicated SSID is to scope these more permissive settings to
 the single misbehaving client instead of weakening the shared IoT SSID for
 everyone else.
+
+Conclusion: this is a pure **device firmware** bug in the ESP-IDF WPA
+supplicant that ships inside the battery. No hostapd tuning will fix it.
+
+### Recovery
+
+Two paths, both of which immediately re-associate the device cleanly:
+
+1. **Re-send `CMD_SET_WIFI` (0x05) over BLE.** This is the scripted path used
+   in this repo, equivalent to entering WiFi credentials in the Marstek app:
+
+   ```bash
+   uv run tools/marstek-probe/ble_probe.py set-wifi \
+       --ssid <your-ssid>
+   # prompts for password on a tty, or reads MARSTEK_WIFI_PASSWORD env var,
+   # or accepts --password 'xxx'
+   ```
+
+   Must be run within ~10 m of the battery. See
+   [`tools/marstek-probe/README.md`](tools/marstek-probe/README.md#set-wifi-destructive)
+   for the full flag surface.
+
+2. **Cold power cycle** the battery (a smart plug works). Slightly slower,
+   but usable without BLE range. A future iteration may automate this via a
+   controller metric + smart-plug watchdog; not yet implemented.
 
 ### What to watch
 
@@ -318,6 +352,13 @@ everyone else.
   the controller falls back to zero discharge.
 - Cheap IoT Wi-Fi stacks often drop or delay ICMP even when application traffic
   is fine, so packet loss alone is not enough evidence of RF trouble.
+
+### Reporting to the vendor
+
+If you hit this bug, a firmware-level fix can only come from Marstek. A
+reproducible bug report including the firmware version (from the BLE
+`DEVICE_INFO (0x04)` exchange — run `uv run tools/marstek-probe/ble_probe.py`)
+and the `hostapd` log pattern above is the most useful form of pressure.
 
 ## Logging / Loki
 

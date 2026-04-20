@@ -39,18 +39,19 @@ type Config struct {
 	MQTTStatusHardFailAfter time.Duration
 
 	// Controller
-	ControlInterval       time.Duration
-	SmoothingAlpha        float64
-	DeadbandWatts         float64
-	ImportBiasWatts       int // deliberate grid-import headroom; subtracted from raw target
-	RampUpWattsPerCycle   int
-	RampDownWattsPerCycle int
-	MinCommandDeltaWatts  int
-	MinHoldTime           time.Duration
-	MinOutputWatts        int
-	MaxOutputWatts        int
-	PersistToFlash        bool
-	AllowFlashWrites      bool
+	ControlInterval               time.Duration
+	SmoothingAlpha                float64
+	DeadbandWatts                 float64
+	ImportBiasWatts               int // deliberate grid-import headroom; subtracted from raw target
+	RampUpWattsPerCycle           int
+	RampDownWattsPerCycle         int
+	MinCommandDeltaWatts          int // applied when smoothed grid >= 0 (importing or idle)
+	MinCommandDeltaWattsExporting int // applied when smoothed grid < 0
+	MinHoldTime                   time.Duration
+	MinOutputWatts                int
+	MaxOutputWatts                int
+	PersistToFlash                bool
+	AllowFlashWrites              bool
 
 	// Schedule slot
 	ScheduleSlot  int    // 1–5
@@ -90,18 +91,19 @@ func Load() (Config, error) {
 		MQTTStatusPollTimeout:   getEnvDuration("MQTT_STATUS_POLL_TIMEOUT", 5*time.Second),
 		MQTTStatusHardFailAfter: getEnvDuration("MQTT_STATUS_HARD_FAIL_AFTER", 5*time.Minute),
 
-		ControlInterval:       getEnvDuration("CONTROL_INTERVAL", 15*time.Second),
-		SmoothingAlpha:        getEnvFloat("SMOOTHING_ALPHA", 0.5),
-		DeadbandWatts:         getEnvFloat("DEADBAND_WATTS", 25),
-		ImportBiasWatts:       getEnvInt("IMPORT_BIAS_WATTS", 50),
-		RampUpWattsPerCycle:   getEnvInt("RAMP_UP_WATTS_PER_CYCLE", 150),
-		RampDownWattsPerCycle: getEnvInt("RAMP_DOWN_WATTS_PER_CYCLE", 300),
-		MinCommandDeltaWatts:  getEnvInt("MIN_COMMAND_DELTA_WATTS", 25),
-		MinHoldTime:           getEnvDuration("MIN_HOLD_TIME", 30*time.Second),
-		MinOutputWatts:        getEnvInt("MIN_OUTPUT_WATTS", 80),
-		MaxOutputWatts:        getEnvInt("MAX_OUTPUT_WATTS", 800),
-		AllowFlashWrites:      getEnvBool("ALLOW_FLASH_WRITES", false),
-		PersistToFlash:        getEnvBool("PERSIST_TO_FLASH", false),
+		ControlInterval:               getEnvDuration("CONTROL_INTERVAL", 15*time.Second),
+		SmoothingAlpha:                getEnvFloat("SMOOTHING_ALPHA", 0.5),
+		DeadbandWatts:                 getEnvFloat("DEADBAND_WATTS", 25),
+		ImportBiasWatts:               getEnvInt("IMPORT_BIAS_WATTS", 50),
+		RampUpWattsPerCycle:           getEnvInt("RAMP_UP_WATTS_PER_CYCLE", 150),
+		RampDownWattsPerCycle:         getEnvInt("RAMP_DOWN_WATTS_PER_CYCLE", 300),
+		MinCommandDeltaWatts:          getEnvInt("MIN_COMMAND_DELTA_WATTS", 25),
+		MinCommandDeltaWattsExporting: getEnvInt("MIN_COMMAND_DELTA_WATTS_EXPORTING", 5),
+		MinHoldTime:                   getEnvDuration("MIN_HOLD_TIME", 30*time.Second),
+		MinOutputWatts:                getEnvInt("MIN_OUTPUT_WATTS", 80),
+		MaxOutputWatts:                getEnvInt("MAX_OUTPUT_WATTS", 800),
+		AllowFlashWrites:              getEnvBool("ALLOW_FLASH_WRITES", false),
+		PersistToFlash:                getEnvBool("PERSIST_TO_FLASH", false),
 
 		ScheduleSlot:  getEnvInt("SCHEDULE_SLOT", 1),
 		ScheduleStart: getEnv("SCHEDULE_START", "00:00"),
@@ -162,6 +164,12 @@ func (c *Config) validate() error {
 	}
 	if c.RampDownWattsPerCycle < 0 {
 		errs = append(errs, "RAMP_DOWN_WATTS_PER_CYCLE must be >= 0 (0 = unlimited)")
+	}
+	if c.MinCommandDeltaWatts < 0 {
+		errs = append(errs, "MIN_COMMAND_DELTA_WATTS must be >= 0")
+	}
+	if c.MinCommandDeltaWattsExporting < 0 {
+		errs = append(errs, "MIN_COMMAND_DELTA_WATTS_EXPORTING must be >= 0")
 	}
 	if c.MinHoldTime < c.ControlInterval {
 		// Warn in log rather than hard-fail; set to one control interval minimum.

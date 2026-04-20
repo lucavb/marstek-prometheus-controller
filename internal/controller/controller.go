@@ -38,16 +38,17 @@ type Config struct {
 	DeviceID            string
 
 	// Control
-	ControlInterval       time.Duration
-	SmoothingAlpha        float64
-	DeadbandWatts         float64
-	ImportBiasWatts       int // subtract from raw target; keeps a deliberate grid import margin
-	RampUpWattsPerCycle   int
-	RampDownWattsPerCycle int
-	MinCommandDeltaWatts  int
-	MinHoldTime           time.Duration
-	MinOutputWatts        int
-	MaxOutputWatts        int
+	ControlInterval               time.Duration
+	SmoothingAlpha                float64
+	DeadbandWatts                 float64
+	ImportBiasWatts               int // subtract from raw target; keeps a deliberate grid import margin
+	RampUpWattsPerCycle           int
+	RampDownWattsPerCycle         int
+	MinCommandDeltaWatts          int
+	MinCommandDeltaWattsExporting int // applied when smoothed grid < 0 (exporting)
+	MinHoldTime                   time.Duration
+	MinOutputWatts                int
+	MaxOutputWatts                int
 
 	// Schedule slot
 	ControlTopic  string

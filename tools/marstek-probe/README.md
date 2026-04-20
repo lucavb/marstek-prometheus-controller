@@ -78,28 +78,57 @@ summary. The most important rows for the B2500 question are the
 The full JSON report under `reports/` contains raw response bodies so you can
 paste them back into planning conversations.
 
-## BLE probe (`ble_probe.py`)
+## BLE probe and config (`ble_probe.py`)
 
-If the network probe finds nothing useful (the B2500 series will show exactly that result without a local MQTT broker configured), try the Bluetooth probe:
+If the network probe finds nothing useful (the B2500 series will show exactly that result without a local MQTT broker configured), or if the battery has fallen off WiFi and needs to be re-provisioned without opening the Marstek app, use the Bluetooth tool:
 
 ```bash
 uv run tools/marstek-probe/ble_probe.py
 ```
 
-Run within ~10 m of the battery. It scans for devices advertising the Marstek Hame GATT service (`0000ff00-0000-1000-8000-00805f9b34fb`) or names matching `HM_*`, `B2500*`, `Marstek*`, `BluePalm*`, `MST*`, picks the strongest candidate, connects, and sends three **read-only** commands:
+Run within ~10 m of the battery. It scans for devices advertising the Marstek Hame GATT service (`0000ff00-0000-1000-8000-00805f9b34fb`) or names matching `HM_*`, `B2500*`, `Marstek*`, `BluePalm*`, `MST*`, and picks the strongest candidate.
+
+### `probe` (default, read-only)
+
+Sends three read-only commands and dumps the parsed responses:
 
 - `0x04` DEVICE_INFO -> model, device id, MAC, Wi-Fi SSID
 - `0x03` RUNTIME_INFO -> SOC, input/output power, wifi/mqtt state, temperatures, daily totals
 - `0x0F` CELL_INFO -> per-cell data
 
-It does not send `SET_WIFI`, `SET_MQTT`, or `RESET_MQTT` - no configuration is touched. Output mirrors the UDP probe (rich summary table plus a JSON report under `reports/ble-probe-<ts>.json`).
+Output mirrors the UDP probe (rich summary table plus a JSON report under `reports/ble-probe-<ts>.json`).
 
-Flags:
+### `set-wifi` (destructive)
+
+Equivalent to re-entering WiFi credentials in the Marstek app. Useful when the battery is stuck in a WPA2 MIC-failure reassociation loop and no longer reachable over IP — see the "Troubleshooting" section of the repo README.
+
+```bash
+# explicit password (shows up in shell history — fine on a trusted machine)
+uv run tools/marstek-probe/ble_probe.py set-wifi \
+    --ssid my-iot-ssid --password 'hunter2'
+
+# via env var (keeps it out of shell history)
+MARSTEK_WIFI_PASSWORD='hunter2' \
+    uv run tools/marstek-probe/ble_probe.py set-wifi --ssid my-iot-ssid
+
+# omit --password entirely: prompted interactively on a tty
+uv run tools/marstek-probe/ble_probe.py set-wifi --ssid my-iot-ssid
+```
+
+After the write, the device re-associates on the new SSID within ~30 s. The tool reads back `RUNTIME_INFO` once as a sanity check; `wifi_connected` may briefly still be `false` in the readback because reassociation hasn't completed yet. Rerun `probe` a minute later to confirm WiFi + MQTT are back.
+
+If the SSID or password is wrong, the battery will drop off WiFi permanently until you rerun this command with correct values — BLE stays available regardless.
+
+### `set-mqtt` / `reset-mqtt`
+
+Point the battery at a custom MQTT broker (or reset it back to the Marstek cloud). Used during initial provisioning of `hm2mqtt`. See `--help` for flags.
+
+### Common flags
 
 - `--scan-timeout` BLE scan duration (default 10 s)
 - `--cmd-timeout`  per-command response timeout (default 3 s)
-- `--address`      skip discovery and connect to this BLE MAC directly
-- `--output PATH`  custom report path
+- `--address`      skip discovery and connect to this BLE MAC / CoreBluetooth UUID directly
+- `--output PATH`  custom report path (probe only)
 
 On macOS, the first run will trigger a Bluetooth permission prompt for the terminal.
 

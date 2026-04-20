@@ -222,7 +222,19 @@ func (c *Controller) Step(ctx context.Context) error {
 		}
 	}
 
-	if abs(ramped-c.lastCommandWatts) < c.cfg.MinCommandDeltaWatts {
+	// Delta gate is asymmetric: during active export a reduction should be
+	// published even if small, because every watt still discharging is lost
+	// energy. The exporting threshold defaults to 5 W so -4..+4 W meter noise
+	// around zero doesn't republish the same schedule, while anything larger
+	// passes through. A zero delta is always suppressed so we never republish
+	// the same schedule regardless of threshold — this also protects against
+	// MQTT spam when MIN_COMMAND_DELTA_WATTS_EXPORTING is set to 0.
+	deltaThreshold := c.cfg.MinCommandDeltaWatts
+	if exporting {
+		deltaThreshold = c.cfg.MinCommandDeltaWattsExporting
+	}
+	delta := abs(ramped - c.lastCommandWatts)
+	if delta == 0 || delta < deltaThreshold {
 		if c.m != nil {
 			c.m.CommandSuppressedTotal.WithLabelValues("delta").Inc()
 			c.updateState(smoothed)

@@ -142,24 +142,25 @@ func freshDevStatus() marstek.Status {
 
 func defaultCfg(ctrl, start, end string) controller.Config {
 	return controller.Config{
-		PrometheusStaleAfter:  60 * time.Second,
-		StatusStaleAfter:      2 * time.Minute,
-		StatusPollTimeout:     5 * time.Second,
-		StatusHardFailAfter:   5 * time.Minute,
-		ControlInterval:       15 * time.Second,
-		SmoothingAlpha:        1.0, // no smoothing in tests for determinism
-		DeadbandWatts:         25,
-		RampUpWattsPerCycle:   800, // effectively no ramp in unit tests
-		RampDownWattsPerCycle: 800,
-		MinCommandDeltaWatts:  1,
-		MinHoldTime:           0,
-		MinOutputWatts:        80,
-		MaxOutputWatts:        800,
-		ControlTopic:          ctrl,
-		ScheduleSlot:          1,
-		ScheduleStart:         start,
-		ScheduleEnd:           end,
-		PersistToFlash:        false,
+		PrometheusStaleAfter:          60 * time.Second,
+		StatusStaleAfter:              2 * time.Minute,
+		StatusPollTimeout:             5 * time.Second,
+		StatusHardFailAfter:           5 * time.Minute,
+		ControlInterval:               15 * time.Second,
+		SmoothingAlpha:                1.0, // no smoothing in tests for determinism
+		DeadbandWatts:                 25,
+		RampUpWattsPerCycle:           800, // effectively no ramp in unit tests
+		RampDownWattsPerCycle:         800,
+		MinCommandDeltaWatts:          1,
+		MinCommandDeltaWattsExporting: 0,
+		MinHoldTime:                   0,
+		MinOutputWatts:                80,
+		MaxOutputWatts:                800,
+		ControlTopic:                  ctrl,
+		ScheduleSlot:                  1,
+		ScheduleStart:                 start,
+		ScheduleEnd:                   end,
+		PersistToFlash:                false,
 	}
 }
 
@@ -639,6 +640,51 @@ func TestStep_HoldTime_StillSuppresses_WhenNotExporting(t *testing.T) {
 
 	if pub.count() != countBefore {
 		t.Errorf("non-export hold-time suppression regressed: got %d publishes, want %d", pub.count(), countBefore)
+	}
+}
+
+// TestStep_ExportFastPath_BothGatesBypassed verifies that when the grid is
+// exporting and we are reducing the command, both the min-delta gate and the
+// hold-time gate are bypassed. This is the critical cross-gate interaction: if
+// either gate were not bypassed, the battery would keep discharging into the
+// grid for up to the hold window.
+func TestStep_ExportFastPath_BothGatesBypassed(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	// MinCommandDeltaWatts=200 so non-export gate is very tight. Warmup uses
+	// grid=300 so its delta (300) clears the 200 W non-export threshold.
+	cfg.MinCommandDeltaWatts = 200
+	cfg.MinCommandDeltaWattsExporting = 5
+	cfg.MinHoldTime = 60 * time.Second
+	cfg.MinOutputWatts = 1
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Warmup: 300 W import → delta=300 >= 200 → publishes; lastCommandWatts=300.
+	p.set(300, 0)
+	st.setFresh(freshDevStatus())
+	_ = c.Step(context.Background())
+	if pub.count() != 1 {
+		t.Fatalf("expected warmup publish, got %d", pub.count())
+	}
+
+	// 10 s into hold time, grid goes negative (exporting).
+	// delta = |0 − 300| = 300 ≥ export threshold 5 → delta gate passes.
+	// hold-time is still active but export fast-path bypasses it.
+	clk.advance(10 * time.Second)
+	p.set(-50, 0)
+	st.setFresh(freshDevStatus()) // g1=g2=0 → currentOutput=0, rawTarget=0
+	_ = c.Step(context.Background())
+
+	if pub.count() != 2 {
+		t.Fatalf("expected export fast-path to bypass both delta and hold-time gates; pub count=%d want 2", pub.count())
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Errorf("expected slot disabled (a1=0,v1=0), got %q", last)
 	}
 }
 
@@ -1253,5 +1299,164 @@ func TestStep_AboveMinOutputWatts_PassesThrough(t *testing.T) {
 	}
 	if !strings.Contains(last, ",v1=200,") {
 		t.Errorf("expected v1=200 unchanged, got %q", last)
+	}
+}
+
+// devStatusWithOutput returns a fresh device status with the given current
+// output watts on port 1 (g1) and port 2 (g2). The rest of the fields match
+// freshDevStatus so SoC/DoD values keep the controller above the soft floor.
+func devStatusWithOutput(g1, g2 int) marstek.Status {
+	return marstek.ParseStatus(fmt.Sprintf(
+		"p1=1,p2=1,w1=375,w2=380,pe=51,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=90,"+
+			"lv=240,cj=0,kn=1142,g1=%d,g2=%d,b1=0,b2=0,md=0,"+
+			"d1=1,e1=0:0,f1=23:59,h1=240,d2=0,e2=0:0,f2=23:59,h2=80,"+
+			"d3=0,e3=0:0,f3=23:59,h3=80,d4=0,e4=0:0,f4=23:59,h4=80,"+
+			"d5=0,e5=0:0,f5=23:59,h5=80,lmo=2045,lmi=1483,lmf=0,uv=107,sm=0,bn=0,ct_t=7,tc_dis=1",
+		g1, g2,
+	))
+}
+
+// TestStep_MinCommandDelta_Asymmetric verifies that MinCommandDeltaWatts is
+// applied when the smoothed grid is non-negative, and MinCommandDeltaWattsExporting
+// is applied when the smoothed grid is negative (exporting). A zero delta is
+// always suppressed regardless of which threshold is in effect.
+//
+// All cases use ImportBiasWatts=0, SmoothingAlpha=1.0, and generous ramp limits
+// so that rawTarget = currentOutput + grid and smoothed = grid exactly.
+func TestStep_MinCommandDelta_Asymmetric(t *testing.T) {
+	cases := []struct {
+		name string
+		// Warmup step establishes lastCommandWatts. g1/g2=0 for warmup.
+		warmupGrid float64
+		// Test step: grid reading and device-reported current output.
+		testGrid       float64
+		testG1, testG2 int
+		minDelta       int
+		minDeltaExp    int
+		wantPublish    bool
+		// If true, run a second identical test step and assert still suppressed.
+		assertStillSuppressedOnRepeat bool
+	}{
+		// ── Group 1: export-classification boundary ──────────────────────────
+		// The key discriminator: same delta=5, non-export threshold=50 suppresses
+		// while export threshold=5 passes (strict < means == is a pass).
+		{
+			name:       "G1a smoothed>0 delta=5 uses non-export threshold -> suppressed",
+			warmupGrid: 100,                      // lastCommandWatts = 100
+			testGrid:   5, testG1: 90, testG2: 0, // rawTarget = 90+5 = 95, delta=5
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish: false,
+		},
+		{
+			name:       "G1b smoothed<0 delta=5 uses export threshold (5 not < 5) -> publishes",
+			warmupGrid: 100,                        // lastCommandWatts = 100
+			testGrid:   -5, testG1: 100, testG2: 0, // rawTarget = 100+(-5) = 95, delta=5
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish: true,
+		},
+		{
+			name:       "G1c smoothed=0 treated as non-export (no-op when delta=0)",
+			warmupGrid: 100,                       // lastCommandWatts = 100
+			testGrid:   0, testG1: 100, testG2: 0, // rawTarget = 100, delta=0 -> no-op
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish: false,
+		},
+
+		// ── Group 2: threshold-value boundary ───────────────────────────────
+		{
+			name:       "G2a export delta==threshold -> publishes (strict <)",
+			warmupGrid: 100,
+			testGrid:   -5, testG1: 100, testG2: 0, // rawTarget=95, delta=5
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish: true,
+		},
+		{
+			name:       "G2b export delta==threshold-1 -> suppressed",
+			warmupGrid: 100,
+			testGrid:   -4, testG1: 100, testG2: 0, // rawTarget=96, delta=4
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish: false,
+		},
+		{
+			name:       "G2c non-export delta==threshold -> publishes (strict <)",
+			warmupGrid: 100,
+			testGrid:   50, testG1: 100, testG2: 0, // rawTarget=150, delta=50
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish: true,
+		},
+
+		// ── Group 3: no-op guard (delta=0 always suppressed) ────────────────
+		{
+			name:       "G3a export delta=0 threshold=5 -> suppressed",
+			warmupGrid: 95,                         // lastCommandWatts = 95
+			testGrid:   -5, testG1: 100, testG2: 0, // rawTarget=100+(-5)=95, delta=0
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish:                   false,
+			assertStillSuppressedOnRepeat: true,
+		},
+		{
+			name:       "G3b export delta=0 threshold=0 -> suppressed by explicit guard (no MQTT spam)",
+			warmupGrid: 95,
+			testGrid:   -5, testG1: 100, testG2: 0, // rawTarget=95, delta=0
+			minDelta: 50, minDeltaExp: 0,
+			wantPublish:                   false,
+			assertStillSuppressedOnRepeat: true,
+		},
+		{
+			name:       "G3c non-export delta=0 -> suppressed",
+			warmupGrid: 100,
+			testGrid:   100, testG1: 0, testG2: 0, // rawTarget=100, delta=0
+			minDelta: 50, minDeltaExp: 5,
+			wantPublish: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &fakeProm{}
+			pub := &fakePublisher{}
+			st := &fakeStatus{}
+			clk := &fakeClock{now: time.Now()}
+
+			cfg := defaultCfg("topic", "00:00", "23:59")
+			cfg.MinCommandDeltaWatts = tc.minDelta
+			cfg.MinCommandDeltaWattsExporting = tc.minDeltaExp
+			cfg.MinOutputWatts = 1 // keep small so 95W targets aren't snapped up
+			cfg.MinHoldTime = 0    // no hold-time interference
+
+			c := controller.New(cfg, p, pub, st, clk, nil)
+
+			// Warmup step: establish lastCommandWatts.
+			p.set(tc.warmupGrid, 0)
+			st.setFresh(freshDevStatus()) // g1=g2=0 for warmup
+			if err := c.Step(context.Background()); err != nil {
+				t.Fatalf("warmup Step() error = %v", err)
+			}
+
+			// Test step.
+			p.set(tc.testGrid, 0)
+			st.setFresh(devStatusWithOutput(tc.testG1, tc.testG2))
+			before := pub.count()
+			if err := c.Step(context.Background()); err != nil {
+				t.Fatalf("test Step() error = %v", err)
+			}
+
+			published := pub.count() > before
+			if published != tc.wantPublish {
+				t.Errorf("publish=%v, want %v (pub count before=%d after=%d)",
+					published, tc.wantPublish, before, pub.count())
+			}
+
+			// For no-op cases, verify a repeat step also doesn't publish.
+			if tc.assertStillSuppressedOnRepeat {
+				before2 := pub.count()
+				st.setFresh(devStatusWithOutput(tc.testG1, tc.testG2))
+				_ = c.Step(context.Background())
+				if pub.count() != before2 {
+					t.Errorf("repeat step published unexpectedly (count %d→%d); delta=0 should always suppress",
+						before2, pub.count())
+				}
+			}
+		})
 	}
 }
