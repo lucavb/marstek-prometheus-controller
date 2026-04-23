@@ -64,6 +64,14 @@ type Config struct {
 	BatterySoCFloorMarginPercent   int // added to (100 − DoDPercent); default 2
 	BatterySoCHysteresisPercent    int // resume SoC = soft floor + this; default 5
 	BatterySoCFloorFallbackPercent int // used when DoDPercent is 0/unknown; default 15
+
+	// Full-battery override — raises the commanded ceiling to MaxOutputWatts
+	// when the battery is full and solar is producing, preventing the firmware
+	// from inhibiting MPPT due to a too-low AC output cap.
+	FullBatteryOverrideEnabled         bool
+	FullBatterySoCEnterPercent         int // activate when SoC >= this for N consecutive samples
+	FullBatterySoCExitPercent          int // deactivate when SoC drops to/below this
+	FullBatteryEnterConsecutiveSamples int // N consecutive high-SoC samples required to enter
 }
 
 // Load reads all configuration from environment variables and returns a
@@ -112,6 +120,11 @@ func Load() (Config, error) {
 		BatterySoCFloorMarginPercent:   getEnvInt("BATTERY_SOC_FLOOR_MARGIN_PERCENT", 2),
 		BatterySoCHysteresisPercent:    getEnvInt("BATTERY_SOC_HYSTERESIS_PERCENT", 5),
 		BatterySoCFloorFallbackPercent: getEnvInt("BATTERY_SOC_FLOOR_FALLBACK_PERCENT", 15),
+
+		FullBatteryOverrideEnabled:         getEnvBool("FULL_BATTERY_OVERRIDE_ENABLED", true),
+		FullBatterySoCEnterPercent:         getEnvInt("FULL_BATTERY_SOC_ENTER_PERCENT", 100),
+		FullBatterySoCExitPercent:          getEnvInt("FULL_BATTERY_SOC_EXIT_PERCENT", 98),
+		FullBatteryEnterConsecutiveSamples: getEnvInt("FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES", 2),
 	}
 
 	return cfg, cfg.validate()
@@ -183,6 +196,18 @@ func (c *Config) validate() error {
 	}
 	if c.BatterySoCFloorFallbackPercent < 5 || c.BatterySoCFloorFallbackPercent > 50 {
 		errs = append(errs, "BATTERY_SOC_FLOOR_FALLBACK_PERCENT must be 5–50")
+	}
+	if c.FullBatterySoCEnterPercent < 1 || c.FullBatterySoCEnterPercent > 100 {
+		errs = append(errs, "FULL_BATTERY_SOC_ENTER_PERCENT must be 1–100")
+	}
+	if c.FullBatterySoCExitPercent < 0 || c.FullBatterySoCExitPercent > 99 {
+		errs = append(errs, "FULL_BATTERY_SOC_EXIT_PERCENT must be 0–99")
+	}
+	if c.FullBatterySoCExitPercent >= c.FullBatterySoCEnterPercent {
+		errs = append(errs, "FULL_BATTERY_SOC_EXIT_PERCENT must be less than FULL_BATTERY_SOC_ENTER_PERCENT")
+	}
+	if c.FullBatteryEnterConsecutiveSamples < 1 {
+		errs = append(errs, "FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES must be >= 1")
 	}
 
 	if len(errs) > 0 {

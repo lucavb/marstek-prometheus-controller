@@ -126,6 +126,11 @@ func run() error {
 		BatterySoCFloorMarginPercent:   cfg.BatterySoCFloorMarginPercent,
 		BatterySoCHysteresisPercent:    cfg.BatterySoCHysteresisPercent,
 		BatterySoCFloorFallbackPercent: cfg.BatterySoCFloorFallbackPercent,
+
+		FullBatteryOverrideEnabled:         cfg.FullBatteryOverrideEnabled,
+		FullBatterySoCEnterPercent:         cfg.FullBatterySoCEnterPercent,
+		FullBatterySoCExitPercent:          cfg.FullBatterySoCExitPercent,
+		FullBatteryEnterConsecutiveSamples: cfg.FullBatteryEnterConsecutiveSamples,
 	}
 
 	ctrl := controller.New(ctrlCfg, prom, mqtt, statusSrc, nil, m)

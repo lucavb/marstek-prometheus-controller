@@ -67,6 +67,42 @@ The same fast-path logic applies to `MIN_HOLD_TIME` and the min-delta gate: both
 so small export-driven reductions are never swallowed while the battery is
 giving energy away.
 
+## Full-battery override
+
+In `ct_t=7` mode (externally-controlled setpoint) the device uses the commanded
+slot-power as a **hard ceiling** on its AC output. When the battery is full
+(SoC=100 %) and the house load is below the panels' production, this ceiling
+can be too low to give firmware a legal place to put the excess solar energy —
+so the device disables MPPT entirely. Panels go dark while the battery slowly
+discharges serving the house load; MPPT only re-enables once SoC ticks off 100 %.
+
+The full-battery override prevents this by raising the commanded ceiling to
+`MAX_OUTPUT_WATTS` (800 W) whenever the battery is full and solar is producing.
+With the ceiling lifted, firmware can route panels to house load and — provided
+surplus feed-in is enabled in the Marstek app (`tc_dis=0`) — export the
+remainder to the grid.
+
+**Entry:** `FULL_BATTERY_SOC_ENTER_PERCENT` (default 100 %) for
+`FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES` (default 2) consecutive control cycles
+**and** `w1+w2 > 0 W` (sun is up).
+
+**Exit:** SoC drops to or below `FULL_BATTERY_SOC_EXIT_PERCENT` (default 98 %)
+**or** solar drops to 0 W. Normal zero-import control then resumes.
+
+**Surplus feed-in requirement:** the "panels-to-grid" outcome requires surplus
+feed-in to be enabled in the Marstek app. The controller logs a warning on first
+status if it detects `tc_dis=1` with the override enabled. If feed-in is off,
+raising the ceiling still prevents the overshoot trap but the device will serve
+house load from solar rather than exporting the difference.
+
+**Panel arrays above 800 W:** the override raises the ceiling to
+`MAX_OUTPUT_WATTS=800` W (device hard limit — cannot be raised higher). Arrays
+that can produce more than 800 W at peak will see a small amount of DC-side
+curtailment near solar noon while the battery is full. This is still a strict
+improvement over the pre-override state where MPPT was fully inhibited.
+
+To disable the override entirely set `FULL_BATTERY_OVERRIDE_ENABLED=false`.
+
 ## Prerequisites
 
 1. Your B2500 is configured to connect to a local MQTT broker — see the
@@ -121,6 +157,10 @@ All settings are environment variables:
 | `BATTERY_SOC_FLOOR_MARGIN_PERCENT` | `2`               | Added to `(100 − device DoD%)` to derive the controller SoC soft floor. When SoC falls at or below this floor, discharge is suppressed until SoC recovers by `BATTERY_SOC_HYSTERESIS_PERCENT`. |
 | `BATTERY_SOC_HYSTERESIS_PERCENT`   | `5`               | Hysteresis band above the soft floor; discharge only resumes once SoC ≥ `(soft_floor + hysteresis)`. Prevents rapid on/off cycling near the floor. |
 | `BATTERY_SOC_FLOOR_FALLBACK_PERCENT` | `15`            | Absolute SoC floor used when the device status does not report a DoD value (`do=0`). |
+| `FULL_BATTERY_OVERRIDE_ENABLED`    | `true`            | Enable the full-battery override (see [Full-battery override](#full-battery-override)). Set to `false` to disable entirely. |
+| `FULL_BATTERY_SOC_ENTER_PERCENT`   | `100`             | SoC threshold to enter the override. Must be 1–100. |
+| `FULL_BATTERY_SOC_EXIT_PERCENT`    | `98`              | SoC threshold to exit the override. Must be 0–99 and less than `FULL_BATTERY_SOC_ENTER_PERCENT`. |
+| `FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES` | `2`       | Number of consecutive control cycles at or above `FULL_BATTERY_SOC_ENTER_PERCENT` (with solar > 0) required before the override activates. Prevents false activation on rapid SoC jumps near the top. |
 
 
 ## Deployment
@@ -198,6 +238,8 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `battery_soc_soft_floor_percent` | Gauge | Derived SoC soft floor: `(100−DoD)+margin`. Discharge is suppressed below this value. |
 | `battery_temp_min_celsius`   | Gauge | Device-reported minimum cell temperature (°C); observability only |
 | `battery_temp_max_celsius`   | Gauge | Device-reported maximum cell temperature (°C); observability only |
+| `full_battery_override_active` | Gauge | 1 while the full-battery override is active (SoC at ceiling, solar producing); 0 otherwise |
+| `surplus_feed_in_enabled`    | Gauge | 1 when the device has surplus feed-in enabled (`tc_dis=0`); 0 when disabled |
 
 
 **Dependency health**
@@ -226,8 +268,10 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `mqtt_status_messages_total`    | Counter   |          | Total device status messages received                                                     |
 | `self_polls_total`              | Counter   |          | Times the controller self-polled (status was stale)                                       |
 | `control_cycles_total`          | Counter   |          | Total control loop iterations                                                             |
-| `command_suppressed_total`      | Counter   | `reason` | Suppressed commands (deadband, delta, hold_time, disconnected, status_stale, soc_floor)   |
+| `command_suppressed_total`      | Counter   | `reason` | Suppressed commands (deadband, delta, hold_time, disconnected, status_stale, soc_floor, transient_zero_output) |
 | `fallback_total`                | Counter   | `reason` | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error) |
+| `full_battery_override_entered_total` | Counter | | Times the full-battery override has been activated (rising edge) |
+| `full_battery_override_exited_total`  | Counter | | Times the full-battery override has been deactivated (falling edge) |
 | `control_loop_duration_seconds` | Histogram |          | Wall time per control cycle                                                               |
 
 

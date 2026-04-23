@@ -109,6 +109,11 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.m.LastStatusAgeSecs.Set(statusAge.Seconds())
 	}
 
+	// Capture the previous status before overwriting — the transient-zero guard
+	// below needs to compare the current output against what was reported last
+	// cycle, not the current cycle's (already-updated) lastStatus.
+	prevStatus := c.lastStatus
+	hasPrevStatus := c.hasLastStatus
 	c.lastStatus = devStatus
 	c.hasLastStatus = true
 
@@ -151,9 +156,17 @@ func (c *Controller) Step(ctx context.Context) error {
 		if devStatus.Output1Enabled == 0 && devStatus.Output2Enabled == 0 {
 			slog.Warn("both output ports are disabled; discharge commands will produce 0 W until outputs are enabled")
 		}
-		if devStatus.SurplusFeedIn {
-			slog.Warn("surplus feed-in is enabled; this may interfere with zero-export control")
+		if c.cfg.FullBatteryOverrideEnabled && !devStatus.SurplusFeedIn {
+			slog.Warn("full-battery override is enabled but surplus feed-in is disabled in the app (tc_dis=1); panels-to-grid will not work while battery is full until surplus feed-in is re-enabled")
 		}
+	}
+
+	if c.m != nil {
+		surplusVal := 0.0
+		if devStatus.SurplusFeedIn {
+			surplusVal = 1.0
+		}
+		c.m.SurplusFeedInEnabled.Set(surplusVal)
 	}
 
 	if c.socFloorActive {
@@ -166,8 +179,31 @@ func (c *Controller) Step(ctx context.Context) error {
 		// to discharge. Mark ready so the readiness probe reflects that the
 		// controller is operating normally (same logic as deadband suppression).
 		c.ready = true
+		c.transientZeroFiredLastCycle = false
 		return c.commandZero(ctx, now, devStatus)
 	}
+
+	// ── 2b. Transient-zero-output guard ──────────────────────────────────────
+	// A single-cycle g1=g2=0 report while we were actively commanding output is
+	// a device reporting blip (confirmed in Drop A: one cycle before a rapid
+	// recovery). Recomputing rawTarget from zero output causes a snap to
+	// MinOutputWatts=80 which can then trigger MPPT inhibit at SoC=100.
+	// Hold the previous command for exactly one cycle; if the next cycle is
+	// still zero we proceed normally so we can never get stuck.
+	currentZeroOutput := devStatus.Output1Watts == 0 && devStatus.Output2Watts == 0
+	prevHadOutput := hasPrevStatus && (prevStatus.Output1Watts+prevStatus.Output2Watts) > 0
+	if currentZeroOutput && prevHadOutput && c.lastCommandWatts > c.cfg.MinOutputWatts && !c.transientZeroFiredLastCycle {
+		c.transientZeroFiredLastCycle = true
+		if c.m != nil {
+			c.m.CommandSuppressedTotal.WithLabelValues("transient_zero_output").Inc()
+		}
+		slog.Debug("transient zero output suppressed",
+			"last_command_watts", c.lastCommandWatts,
+			"soc_pct", devStatus.SOCPercent)
+		c.ready = true
+		return nil
+	}
+	c.transientZeroFiredLastCycle = false
 
 	// ── 3. Smooth the grid power signal ──────────────────────────────────────
 	smoothed := c.smooth(sample.Watts)
@@ -194,6 +230,64 @@ func (c *Controller) Step(ctx context.Context) error {
 	// never target an unreachable wattage. Zero stays zero (stop = disable slot).
 	if rawTarget > 0 && rawTarget < c.cfg.MinOutputWatts {
 		rawTarget = c.cfg.MinOutputWatts
+	}
+
+	// ── 4b. Full-battery override ─────────────────────────────────────────────
+	// When the battery is full and solar is producing, the firmware uses the
+	// commanded slot-power as a hard AC output ceiling. If that ceiling is ≤
+	// house load, firmware has nowhere to put excess solar and inhibits MPPT.
+	// The fix: raise the ceiling to MaxOutputWatts so firmware can always route
+	// panels-to-AC and, when SurplusFeedIn is enabled, panels-to-grid.
+	solarWatts := devStatus.Solar1Watts + devStatus.Solar2Watts
+	if c.cfg.FullBatteryOverrideEnabled {
+		atEnterThreshold := devStatus.SOCPercent >= c.cfg.FullBatterySoCEnterPercent
+		if atEnterThreshold && solarWatts > 0 {
+			c.fullBatterySoCHighSamples++
+		} else {
+			c.fullBatterySoCHighSamples = 0
+		}
+
+		shouldBeActive := c.fullBatterySoCHighSamples >= c.cfg.FullBatteryEnterConsecutiveSamples &&
+			devStatus.SOCPercent > c.cfg.FullBatterySoCExitPercent &&
+			solarWatts > 0
+
+		if shouldBeActive && !c.fullBatteryOverrideActive {
+			c.fullBatteryOverrideActive = true
+			if c.m != nil {
+				c.m.FullBatteryOverrideEntered.Inc()
+			}
+			if !devStatus.SurplusFeedIn && c.m != nil {
+				slog.Warn("full-battery override active but surplus feed-in is disabled in the app (tc_dis=1); panels-to-grid will not work until re-enabled")
+			}
+			slog.Info("full-battery override activated",
+				"soc_pct", devStatus.SOCPercent,
+				"solar_watts", solarWatts,
+				"surplus_feed_in", devStatus.SurplusFeedIn)
+		} else if !shouldBeActive && c.fullBatteryOverrideActive {
+			c.fullBatteryOverrideActive = false
+			if c.m != nil {
+				c.m.FullBatteryOverrideExited.Inc()
+			}
+			slog.Info("full-battery override deactivated",
+				"soc_pct", devStatus.SOCPercent,
+				"solar_watts", solarWatts)
+		}
+	} else {
+		// Override disabled via config: ensure state is clean.
+		c.fullBatteryOverrideActive = false
+		c.fullBatterySoCHighSamples = 0
+	}
+
+	if c.m != nil {
+		overrideVal := 0.0
+		if c.fullBatteryOverrideActive {
+			overrideVal = 1.0
+		}
+		c.m.FullBatteryOverrideActive.Set(overrideVal)
+	}
+
+	if c.fullBatteryOverrideActive {
+		rawTarget = c.cfg.MaxOutputWatts
 	}
 
 	if c.m != nil {

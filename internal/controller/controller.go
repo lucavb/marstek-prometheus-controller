@@ -64,6 +64,14 @@ type Config struct {
 	BatterySoCFloorMarginPercent   int
 	BatterySoCHysteresisPercent    int
 	BatterySoCFloorFallbackPercent int
+
+	// Full-battery override — raises the commanded ceiling to MaxOutputWatts
+	// when the battery is full and solar is producing so that firmware keeps
+	// MPPT active rather than inhibiting it due to a too-low AC output cap.
+	FullBatteryOverrideEnabled         bool
+	FullBatterySoCEnterPercent         int
+	FullBatterySoCExitPercent          int
+	FullBatteryEnterConsecutiveSamples int
 }
 
 // Controller is the main control loop.
@@ -93,6 +101,20 @@ type Controller struct {
 	// socFloorActive is true while SoC is below the derived soft floor.
 	// It stays true until SoC climbs back above (softFloor + hysteresis).
 	socFloorActive bool
+
+	// fullBatteryOverrideActive is true while the battery is full, solar is
+	// producing, and the full-battery override is enabled. While active the
+	// commanded ceiling is raised to MaxOutputWatts so firmware keeps MPPT on.
+	fullBatteryOverrideActive bool
+	// fullBatterySoCHighSamples counts consecutive cycles where SoC >= enter
+	// threshold. The override only activates after this reaches
+	// FullBatteryEnterConsecutiveSamples to avoid false trips on a rapid SoC
+	// jump near the top.
+	fullBatterySoCHighSamples int
+
+	// transientZeroFiredLastCycle prevents the transient-zero-output guard from
+	// holding for more than one consecutive cycle.
+	transientZeroFiredLastCycle bool
 }
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil
