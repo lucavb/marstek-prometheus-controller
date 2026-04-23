@@ -11,6 +11,15 @@ import (
 // HMJ-2 device (firmware vv=110) during plan validation on 2026-04-18.
 const realDevicePayload = "p1=1,p2=1,w1=375,w2=380,pe=51,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=90,lv=240,cj=0,kn=1142,g1=120,g2=118,b1=0,b2=0,md=0,d1=1,e1=0:0,f1=23:59,h1=240,d2=0,e2=0:0,f2=23:59,h2=80,d3=0,e3=0:0,f3=23:59,h3=80,sg=0,sp=80,st=0,tl=24,th=25,tc=0,tf=0,fc=202310231502,id=5,a0=51,a1=0,a2=0,l0=2,l1=0,c0=255,c1=4,bc=4392,bs=3135,pt=4920,it=3229,m0=0,m1=0,m2=0,m3=238,d4=0,e4=0:0,f4=23:59,h4=80,d5=0,e5=0:0,f5=23:59,h5=80,lmo=2045,lmi=1483,lmf=0,uv=107,sm=0,bn=0,ct_t=7,tc_dis=1"
 
+func TestRestartPayload(t *testing.T) {
+	if marstek.RestartPayload != "cd=10" {
+		t.Errorf("RestartPayload = %q, want %q", marstek.RestartPayload, "cd=10")
+	}
+	if marstek.CDRestart != 10 {
+		t.Errorf("CDRestart = %d, want 10", marstek.CDRestart)
+	}
+}
+
 func TestTopics(t *testing.T) {
 	ctrl := marstek.ControlTopic("HMJ-2", "60323bd14b6e")
 	want := "hame_energy/HMJ-2/App/60323bd14b6e/ctrl"

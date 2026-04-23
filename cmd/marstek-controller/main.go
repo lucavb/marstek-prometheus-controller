@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed IANA timezone database so named zones work in minimal containers
 
 	"github.com/lucavb/marstek-prometheus-controller/internal/config"
 	"github.com/lucavb/marstek-prometheus-controller/internal/controller"
@@ -26,6 +27,7 @@ import (
 	"github.com/lucavb/marstek-prometheus-controller/internal/metrics"
 	"github.com/lucavb/marstek-prometheus-controller/internal/mqttclient"
 	"github.com/lucavb/marstek-prometheus-controller/internal/promclient"
+	"github.com/lucavb/marstek-prometheus-controller/internal/schedule"
 )
 
 // version is set at build time via -ldflags "-X main.version=<tag>".
@@ -144,6 +146,27 @@ func run() error {
 	// Start MQTT connected-state poller.
 	go pollMQTTState(ctx, mqtt, m)
 
+	// Start periodic device restart scheduler only when explicitly opted in.
+	// When DEVICE_RESTART_SCHEDULE is empty this block is unreachable — no
+	// goroutine is spawned, no timer is created, no metrics are emitted.
+	if cfg.DeviceRestartSchedule != "" {
+		sched, err := schedule.Parse(cfg.DeviceRestartSchedule)
+		if err != nil {
+			// Defence in depth: config.validate() already caught this.
+			return fmt.Errorf("restart schedule: %w", err)
+		}
+		loc := cfg.DeviceRestartLocation
+		next := sched.Next(time.Now().In(loc))
+		slog.Info("periodic device restart enabled",
+			"spec", cfg.DeviceRestartSchedule,
+			"timezone", loc.String(),
+			"next_fire_local", next.Format(time.RFC3339),
+			"next_fire_utc", next.UTC().Format(time.RFC3339))
+		m.DeviceRestartInfo.WithLabelValues(cfg.DeviceRestartSchedule, loc.String()).Set(1)
+		m.NextDeviceRestartTimestampSecs.Set(float64(next.Unix()))
+		go runRestartScheduler(ctx, sched, loc, mqtt, ctrlTopic, m)
+	}
+
 	// Start HTTP server in background.
 	httpErrCh := make(chan error, 1)
 	go func() {
@@ -176,6 +199,61 @@ func run() error {
 	}
 	slog.Info("marstek-controller stopped cleanly")
 	return nil
+}
+
+// runRestartScheduler fires a cd=10 (SOFTWARE_RESTART) command at each
+// scheduled instant. It is only started when DEVICE_RESTART_SCHEDULE is set.
+//
+// Safety: the mqttclient.Client.Publish queues a pending publish when
+// disconnected and silently replaces any prior pending one. The IsConnected()
+// precheck is therefore load-bearing — it prevents a restart command from
+// stomping a queued control-loop cd=20 publish during an MQTT outage.
+func runRestartScheduler(
+	ctx context.Context,
+	sched *schedule.Schedule,
+	loc *time.Location,
+	pub *mqttclient.Client,
+	ctrlTopic string,
+	m *metrics.Metrics,
+) {
+	for {
+		next := sched.Next(time.Now().In(loc))
+		if next.IsZero() {
+			slog.Error("restart scheduler: no valid next fire time; scheduler stopped")
+			return
+		}
+		m.NextDeviceRestartTimestampSecs.Set(float64(next.Unix()))
+
+		delay := time.Until(next)
+		timer := time.NewTimer(delay)
+
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if !pub.IsConnected() {
+			slog.Warn("restart scheduler: MQTT not connected, skipping restart",
+				"scheduled_utc", next.UTC().Format(time.RFC3339))
+			m.DeviceRestartsTotal.WithLabelValues("skipped_not_connected").Inc()
+			continue
+		}
+
+		if err := pub.Publish(ctrlTopic, marstek.RestartPayload); err != nil {
+			slog.Warn("restart scheduler: publish error",
+				"scheduled_utc", next.UTC().Format(time.RFC3339),
+				"err", err)
+			m.DeviceRestartsTotal.WithLabelValues("publish_error").Inc()
+			continue
+		}
+
+		slog.Warn("restart scheduler: device restart commanded",
+			"scheduled_utc", next.UTC().Format(time.RFC3339))
+		m.DeviceRestartsTotal.WithLabelValues("sent").Inc()
+		m.LastDeviceRestartTimestampSecs.Set(float64(time.Now().Unix()))
+	}
 }
 
 func pollMQTTState(ctx context.Context, mqtt *mqttclient.Client, m *metrics.Metrics) {

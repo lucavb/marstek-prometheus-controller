@@ -67,6 +67,15 @@ type Metrics struct {
 
 	// Device feed-in flag mirrored from device status (tc_dis)
 	SurplusFeedInEnabled prometheus.Gauge // 1 when tc_dis=0 (feed-in enabled), 0 when tc_dis=1
+
+	// Scheduled device restart (opt-in; only emitted when DEVICE_RESTART_SCHEDULE is set).
+	// DeviceRestartInfo is a labeled gauge (value always 1) exposing the active
+	// schedule config. It is a GaugeVec so that no samples are emitted at all
+	// when the feature is disabled — existing dashboards are unaffected.
+	DeviceRestartInfo              *prometheus.GaugeVec   // labels: spec, timezone
+	DeviceRestartsTotal            *prometheus.CounterVec // label: outcome (sent|skipped_not_connected|publish_error)
+	LastDeviceRestartTimestampSecs prometheus.Gauge       // Unix seconds of last successful restart command; 0 if never
+	NextDeviceRestartTimestampSecs prometheus.Gauge       // Unix seconds of upcoming scheduled fire; 0 if disabled
 }
 
 // New creates a Metrics instance with a fresh private registry, all instruments
@@ -110,6 +119,17 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		}, labels)
 		reg.MustRegister(c)
 		return c
+	}
+
+	newGaugeVec := func(name, help string, labels []string) *prometheus.GaugeVec {
+		g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace:   ns,
+			Name:        name,
+			Help:        help,
+			ConstLabels: constLabels,
+		}, labels)
+		reg.MustRegister(g)
+		return g
 	}
 
 	// info gauge — value always 1, all meaningful data in labels.
@@ -167,6 +187,16 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		FullBatteryOverrideExited:  newCounter("full_battery_override_exited_total", "Number of times the full-battery override has been deactivated (falling edge)."),
 
 		SurplusFeedInEnabled: newGauge("surplus_feed_in_enabled", "1 when the device has surplus feed-in enabled (tc_dis=0); 0 when disabled (tc_dis=1). Mirrors the device status flag."),
+
+		// Scheduled device restart metrics. DeviceRestartInfo is a GaugeVec so
+		// that no samples are emitted when the feature is disabled (opt-in).
+		// DeviceRestartsTotal, LastDeviceRestartTimestampSecs, and
+		// NextDeviceRestartTimestampSecs are always registered but stay at zero
+		// until the scheduler goroutine is started.
+		DeviceRestartInfo:              newGaugeVec("device_restart_info", "Scheduled device restart configuration (value always 1). Only emitted when DEVICE_RESTART_SCHEDULE is set.", []string{"spec", "timezone"}),
+		DeviceRestartsTotal:            newCounterVec("device_restarts_total", "Total device restart commands by outcome.", []string{"outcome"}),
+		LastDeviceRestartTimestampSecs: newGauge("last_device_restart_timestamp_seconds", "Unix timestamp of the last successful device restart command; 0 if never sent."),
+		NextDeviceRestartTimestampSecs: newGauge("next_device_restart_timestamp_seconds", "Unix timestamp of the next scheduled device restart; 0 if the feature is disabled."),
 
 		ControlLoopDurationSecs: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace:   ns,

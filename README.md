@@ -161,6 +161,39 @@ All settings are environment variables:
 | `FULL_BATTERY_SOC_ENTER_PERCENT`   | `100`             | SoC threshold to enter the override. Must be 1–100. |
 | `FULL_BATTERY_SOC_EXIT_PERCENT`    | `98`              | SoC threshold to exit the override. Must be 0–99 and less than `FULL_BATTERY_SOC_ENTER_PERCENT`. |
 | `FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES` | `2`       | Number of consecutive control cycles at or above `FULL_BATTERY_SOC_ENTER_PERCENT` (with solar > 0) required before the override activates. Prevents false activation on rapid SoC jumps near the top. |
+| `DEVICE_RESTART_SCHEDULE`           | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4 * * *` for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart). |
+| `DEVICE_RESTART_TIMEZONE`           | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty. |
+
+
+## Scheduled device restart
+
+> **Disabled by default. Opt-in workaround while a device-hang root cause is being investigated. Remove once the root cause is resolved.**
+
+Setting `DEVICE_RESTART_SCHEDULE` causes the controller to publish a `cd=10` (SOFTWARE_RESTART) command to the device at each scheduled time. The device goes offline for approximately 30 s. The controller's existing status-hard-fail fallback drops output to 0 W automatically during that window, so no extra coordination is needed. After reconnecting the device resumes normal operation and the controller republishes the discharge slot on the next control cycle.
+
+### Configuration
+
+```
+DEVICE_RESTART_SCHEDULE=0 4 * * *
+DEVICE_RESTART_TIMEZONE=Europe/Berlin
+```
+
+The schedule uses standard 5-field cron syntax: `minute hour day-of-month month day-of-week`. The timezone defaults to UTC and accepts any IANA zone name (the IANA database is embedded in the binary — no OS timezone package required).
+
+An invalid spec or timezone name is a **hard startup error**; the daemon will refuse to start rather than silently running without the restart you asked for.
+
+### DST edge cases
+
+For zones with daylight saving time, avoid scheduling during the `02:00–03:00` local window. During spring-forward that hour does not exist and the occurrence is skipped; during fall-back Go resolves ambiguous wall-clock times to standard time (the later UTC occurrence). Any time outside that window is unaffected by DST transitions.
+
+### Metrics
+
+| Metric | Description |
+|---|---|
+| `marstek_controller_device_restart_info{spec, timezone}` | Value 1 while the scheduler is active; not emitted when disabled. |
+| `marstek_controller_device_restarts_total{outcome}` | Restart commands by outcome: `sent`, `skipped_not_connected`, `publish_error`. |
+| `marstek_controller_last_device_restart_timestamp_seconds` | Unix timestamp of the last successful restart command. |
+| `marstek_controller_next_device_restart_timestamp_seconds` | Unix timestamp of the next scheduled fire. |
 
 
 ## Deployment

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lucavb/marstek-prometheus-controller/internal/schedule"
 )
 
 // Config holds the full runtime configuration.
@@ -72,6 +74,11 @@ type Config struct {
 	FullBatterySoCEnterPercent         int // activate when SoC >= this for N consecutive samples
 	FullBatterySoCExitPercent          int // deactivate when SoC drops to/below this
 	FullBatteryEnterConsecutiveSamples int // N consecutive high-SoC samples required to enter
+
+	// Scheduled device restart — opt-in workaround for a device that hangs
+	// periodically. Empty schedule disables the feature entirely.
+	DeviceRestartSchedule string         // DEVICE_RESTART_SCHEDULE: 5-field cron, e.g. "0 3 * * *"
+	DeviceRestartLocation *time.Location // parsed from DEVICE_RESTART_TIMEZONE; nil when schedule is empty
 }
 
 // Load reads all configuration from environment variables and returns a
@@ -125,6 +132,20 @@ func Load() (Config, error) {
 		FullBatterySoCEnterPercent:         getEnvInt("FULL_BATTERY_SOC_ENTER_PERCENT", 100),
 		FullBatterySoCExitPercent:          getEnvInt("FULL_BATTERY_SOC_EXIT_PERCENT", 98),
 		FullBatteryEnterConsecutiveSamples: getEnvInt("FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES", 2),
+
+		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
+	}
+
+	// Parse timezone only when a schedule is configured. This keeps the
+	// time/tzdata database lookup out of the hot path and makes it clear that
+	// DEVICE_RESTART_TIMEZONE is a no-op when the feature is disabled.
+	if cfg.DeviceRestartSchedule != "" {
+		tzName := getEnv("DEVICE_RESTART_TIMEZONE", "UTC")
+		loc, err := time.LoadLocation(tzName)
+		if err != nil {
+			return cfg, fmt.Errorf("config: DEVICE_RESTART_TIMEZONE %q: %w", tzName, err)
+		}
+		cfg.DeviceRestartLocation = loc
 	}
 
 	return cfg, cfg.validate()
@@ -208,6 +229,12 @@ func (c *Config) validate() error {
 	}
 	if c.FullBatteryEnterConsecutiveSamples < 1 {
 		errs = append(errs, "FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES must be >= 1")
+	}
+
+	if c.DeviceRestartSchedule != "" {
+		if _, err := schedule.Parse(c.DeviceRestartSchedule); err != nil {
+			errs = append(errs, fmt.Sprintf("DEVICE_RESTART_SCHEDULE: %v", err))
+		}
 	}
 
 	if len(errs) > 0 {

@@ -109,6 +109,112 @@ func TestLoad_MinCommandDeltaNegative_Errors(t *testing.T) {
 	}
 }
 
+// ---- DEVICE_RESTART_SCHEDULE / DEVICE_RESTART_TIMEZONE tests ----
+
+// helper to set the three required env vars.
+func setRequired(t *testing.T) {
+	t.Helper()
+	t.Setenv("PROMETHEUS_BASE_URL", "http://prom:9090")
+	t.Setenv("MQTT_BROKER_URL", "tcp://mqtt:1883")
+	t.Setenv("MARSTEK_DEVICE_ID", "aabbccdd1122")
+}
+
+// TestLoad_DeviceRestart_DisabledByDefault verifies that an empty schedule
+// leaves DeviceRestartSchedule as "" and DeviceRestartLocation as nil.
+func TestLoad_DeviceRestart_DisabledByDefault(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DeviceRestartSchedule != "" {
+		t.Errorf("DeviceRestartSchedule = %q, want empty", cfg.DeviceRestartSchedule)
+	}
+	if cfg.DeviceRestartLocation != nil {
+		t.Errorf("DeviceRestartLocation = %v, want nil", cfg.DeviceRestartLocation)
+	}
+}
+
+// TestLoad_DeviceRestart_ValidScheduleUTC accepts a valid spec with the default UTC zone.
+func TestLoad_DeviceRestart_ValidScheduleUTC(t *testing.T) {
+	setRequired(t)
+	t.Setenv("DEVICE_RESTART_SCHEDULE", "0 3 * * *")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DeviceRestartSchedule != "0 3 * * *" {
+		t.Errorf("DeviceRestartSchedule = %q, want %q", cfg.DeviceRestartSchedule, "0 3 * * *")
+	}
+	if cfg.DeviceRestartLocation == nil {
+		t.Fatal("DeviceRestartLocation is nil, want non-nil")
+	}
+	if cfg.DeviceRestartLocation.String() != "UTC" {
+		t.Errorf("DeviceRestartLocation = %q, want UTC", cfg.DeviceRestartLocation.String())
+	}
+}
+
+// TestLoad_DeviceRestart_ValidScheduleWithTZ accepts a valid spec + IANA zone.
+func TestLoad_DeviceRestart_ValidScheduleWithTZ(t *testing.T) {
+	setRequired(t)
+	t.Setenv("DEVICE_RESTART_SCHEDULE", "0 3 * * *")
+	t.Setenv("DEVICE_RESTART_TIMEZONE", "Europe/Berlin")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DeviceRestartLocation == nil {
+		t.Fatal("DeviceRestartLocation is nil, want non-nil")
+	}
+	if cfg.DeviceRestartLocation.String() != "Europe/Berlin" {
+		t.Errorf("DeviceRestartLocation = %q, want Europe/Berlin", cfg.DeviceRestartLocation.String())
+	}
+}
+
+// TestLoad_DeviceRestart_BadSchedule is a hard config error.
+func TestLoad_DeviceRestart_BadSchedule(t *testing.T) {
+	setRequired(t)
+	t.Setenv("DEVICE_RESTART_SCHEDULE", "not a cron spec")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() expected error for bad schedule, got nil")
+	}
+	if !strings.Contains(err.Error(), "DEVICE_RESTART_SCHEDULE") {
+		t.Errorf("error %q should mention DEVICE_RESTART_SCHEDULE", err.Error())
+	}
+}
+
+// TestLoad_DeviceRestart_BadTimezone is a hard config error.
+func TestLoad_DeviceRestart_BadTimezone(t *testing.T) {
+	setRequired(t)
+	t.Setenv("DEVICE_RESTART_SCHEDULE", "0 3 * * *")
+	t.Setenv("DEVICE_RESTART_TIMEZONE", "Not/AZone")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() expected error for bad timezone, got nil")
+	}
+	if !strings.Contains(err.Error(), "DEVICE_RESTART_TIMEZONE") {
+		t.Errorf("error %q should mention DEVICE_RESTART_TIMEZONE", err.Error())
+	}
+}
+
+// TestLoad_DeviceRestart_TimezoneIgnoredWhenScheduleEmpty verifies that an
+// invalid timezone is silently ignored when no schedule is configured (opt-in).
+func TestLoad_DeviceRestart_TimezoneIgnoredWhenScheduleEmpty(t *testing.T) {
+	setRequired(t)
+	t.Setenv("DEVICE_RESTART_TIMEZONE", "Invalid/Zone")
+	// DEVICE_RESTART_SCHEDULE intentionally NOT set.
+
+	_, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error when schedule is empty: %v", err)
+	}
+}
+
 // TestLoad_MinCommandDeltaMalformed_FallsBackToDefault verifies that a
 // non-integer value causes a warning and falls back to the default rather than
 // hard-failing. (The log output itself is not asserted — only the field value.)

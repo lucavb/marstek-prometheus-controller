@@ -40,6 +40,17 @@ const CDVolatile = 20
 // CDPersist is the command code for a persistent (flash) timed-discharge write.
 const CDPersist = 7
 
+// CDRestart is the command code for a software restart of the device.
+// Publishing RestartPayload to the control topic causes the device to reboot.
+// The device goes offline for approximately 30 s. This triggers the controller's
+// existing status-hard-fail fallback to 0 W — no extra coordination is needed.
+// After reconnecting the device returns to its previous configuration; the
+// controller republishes the timed-discharge slot on the next control cycle.
+const CDRestart = 10
+
+// RestartPayload is the MQTT payload that triggers a device software restart.
+const RestartPayload = "cd=10"
+
 // Slot represents one timed-discharge period as used in write commands.
 // Index is 1-based (1–5).
 type Slot struct {
