@@ -101,6 +101,22 @@ grid-meter-driven control then resumes on the next cycle. The 3-point
 hysteresis band rides through LFP top-end SoC flicker without holding idle long
 after the battery has actually come off full.
 
+**Secondary exit on sustained grid import:** SoC alone is not enough to break
+out of idle when solar drops below house load. With the controlled slot
+disabled no discharge happens, so SoC stays pinned at 100% and the SoC exit
+path never fires — the controller would sit idle while the grid imported
+indefinitely. To fix this, idle also exits when the smoothed grid reading
+shows sustained import above `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS` (default
+`50`) for `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` (default `8` ≈ 2 min at
+the 15 s control interval) consecutive cycles. The battery then resumes
+covering house load through normal control. The default threshold matches
+the default `IMPORT_BIAS_WATTS`, so "idle exits" lines up with "normal
+control would now command a discharge" — no flapping. Set
+`NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES=0` to disable this exit path
+entirely (preserves the pre-2026-04 SoC-only behaviour). Operators who raise
+`IMPORT_BIAS_WATTS` should raise `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS` in
+tandem to keep the two thresholds aligned.
+
 **Hard dependency on surplus feed-in (`tc_dis=0`):** near-full idle will only
 engage when the device reports `SurplusFeedIn = true`. With surplus feed-in
 disabled, the firmware curtails MPPT at full SoC if there is no export path,
@@ -172,7 +188,9 @@ All settings are environment variables:
 | `NEAR_FULL_IDLE_ENTER_PERCENT`       | `98`                       | SoC threshold to enter idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples at or above it. Must satisfy `0 ≤ EXIT_PERCENT < ENTER_PERCENT ≤ 100`.                                                                                                 |
 | `NEAR_FULL_IDLE_EXIT_PERCENT`        | `95`                       | SoC threshold to exit idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples strictly below it. The 3-point hysteresis band rides through LFP top-end SoC flicker.                                                                                   |
 | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` | `2`                        | Debounce length (in control cycles) for both idle entry and exit. Must be ≥ 1. Surplus-feed-in flipping off bypasses this debounce and exits immediately.                                                                                                         |
-| `DEVICE_RESTART_SCHEDULE`            | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4 `* * * for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart).                                     |
+| `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS` | `50`                    | Smoothed-grid import threshold (W) above which an "import sample" is counted while idle is active. Should mirror `IMPORT_BIAS_WATTS` — setting it lower can cause flapping because normal control would not command a discharge on exit. Must be ≥ 0.              |
+| `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` | `8`                  | Consecutive high-import samples required to exit idle via the grid-import path (≈ 2 min at the 15 s control interval). Set to `0` to disable this exit path entirely (SoC-only behaviour). Must be ≥ 0.                                                            |
+| `DEVICE_RESTART_SCHEDULE`            | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4` * * * for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart).                                     |
 | `DEVICE_RESTART_TIMEZONE`            | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty.                                                                                                                                         |
 
 
@@ -317,7 +335,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `fallback_total`                   | Counter   | `reason` | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error)                                                      |
 | `near_full_idle_entered_total`     | Counter   |          | Times the near-full idle regime has been activated (rising edge)                                                                               |
 | `near_full_idle_exited_total`      | Counter   |          | Times the near-full idle regime has been deactivated (falling edge)                                                                            |
-| `near_full_idle_exit_reason_total` | Counter   | `reason` | Reason-specific exits from near-full idle (`soc_exit`, `fallback`, `surplus_feed_in_disabled`, `disabled`)                                     |
+| `near_full_idle_exit_reason_total` | Counter   | `reason` | Reason-specific exits from near-full idle (`soc_exit`, `grid_import`, `fallback`, `surplus_feed_in_disabled`, `disabled`)                      |
 | `control_loop_duration_seconds`    | Histogram |          | Wall time per control cycle                                                                                                                    |
 
 
@@ -343,7 +361,7 @@ follows:
 | `marstek_controller_full_battery_override_active`            | `marstek_controller_near_full_idle_active`                                                                                      |
 | `marstek_controller_full_battery_override_entered_total`     | `marstek_controller_near_full_idle_entered_total`                                                                               |
 | `marstek_controller_full_battery_override_exited_total`      | `marstek_controller_near_full_idle_exited_total`                                                                                |
-| `marstek_controller_full_battery_override_exit_reason_total` | `marstek_controller_near_full_idle_exit_reason_total` (reasons: `soc_exit`, `fallback`, `surplus_feed_in_disabled`, `disabled`) |
+| `marstek_controller_full_battery_override_exit_reason_total` | `marstek_controller_near_full_idle_exit_reason_total` (reasons: `soc_exit`, `grid_import`, `fallback`, `surplus_feed_in_disabled`, `disabled`) |
 
 
 Old environment variables no longer have any effect — they will be ignored on

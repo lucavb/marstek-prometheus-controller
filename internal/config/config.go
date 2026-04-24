@@ -78,6 +78,20 @@ type Config struct {
 	NearFullIdleExitPercent        int // SoC < this for N cycles exits idle (must be < NearFullIdleEnterPercent)
 	NearFullIdleConsecutiveSamples int // N consecutive samples for debounced entry and exit
 
+	// Sustained-grid-import exit path out of near-full idle. The SoC-based
+	// exit alone deadlocks when the slot is disabled: with no discharge, SoC
+	// cannot fall below the SoC exit threshold, so idle never lifts when
+	// solar drops below house load. These two knobs add a secondary exit:
+	// when smoothed grid import exceeds NearFullIdleGridImportExitWatts for
+	// NearFullIdleGridImportExitSamples consecutive cycles, idle exits and
+	// normal control resumes — the battery immediately begins covering the
+	// house load. The default threshold matches the default ImportBiasWatts
+	// so "exit" lines up exactly with "normal control would now discharge";
+	// setting it lower than ImportBiasWatts can cause flap. Setting samples
+	// to 0 disables this exit path entirely (zero-risk rollback).
+	NearFullIdleGridImportExitWatts   int
+	NearFullIdleGridImportExitSamples int
+
 	// Scheduled device restart — opt-in workaround for a device that hangs
 	// periodically. Empty schedule disables the feature entirely.
 	DeviceRestartSchedule string         // DEVICE_RESTART_SCHEDULE: 5-field cron, e.g. "0 3 * * *"
@@ -135,6 +149,9 @@ func Load() (Config, error) {
 		NearFullIdleEnterPercent:       getEnvInt("NEAR_FULL_IDLE_ENTER_PERCENT", 98),
 		NearFullIdleExitPercent:        getEnvInt("NEAR_FULL_IDLE_EXIT_PERCENT", 95),
 		NearFullIdleConsecutiveSamples: getEnvInt("NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES", 2),
+
+		NearFullIdleGridImportExitWatts:   getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS", 50),
+		NearFullIdleGridImportExitSamples: getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", 8),
 
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
 	}
@@ -232,6 +249,12 @@ func (c *Config) validate() error {
 	}
 	if c.NearFullIdleConsecutiveSamples < 1 {
 		errs = append(errs, "NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES must be >= 1")
+	}
+	if c.NearFullIdleGridImportExitWatts < 0 {
+		errs = append(errs, "NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS must be >= 0")
+	}
+	if c.NearFullIdleGridImportExitSamples < 0 {
+		errs = append(errs, "NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES must be >= 0 (0 disables the grid-import exit path)")
 	}
 
 	if c.DeviceRestartSchedule != "" {

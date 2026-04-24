@@ -64,7 +64,7 @@ type Metrics struct {
 	NearFullIdleActive          prometheus.Gauge       // 1 while the controller is suppressing discharge near full charge
 	NearFullIdleEntered         prometheus.Counter     // incremented on each rising edge (inactive → active)
 	NearFullIdleExited          prometheus.Counter     // incremented on each falling edge (active → inactive)
-	NearFullIdleExitReasonTotal *prometheus.CounterVec // label: reason (soc_exit, fallback, surplus_feed_in_disabled, disabled)
+	NearFullIdleExitReasonTotal *prometheus.CounterVec // label: reason (soc_exit, grid_import, fallback, surplus_feed_in_disabled, disabled)
 
 	// Device feed-in flag mirrored from device status (tc_dis)
 	SurplusFeedInEnabled prometheus.Gauge // 1 when tc_dis=0 (feed-in enabled), 0 when tc_dis=1

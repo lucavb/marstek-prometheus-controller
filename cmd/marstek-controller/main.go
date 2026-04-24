@@ -133,6 +133,9 @@ func run() error {
 		NearFullIdleEnterPercent:       cfg.NearFullIdleEnterPercent,
 		NearFullIdleExitPercent:        cfg.NearFullIdleExitPercent,
 		NearFullIdleConsecutiveSamples: cfg.NearFullIdleConsecutiveSamples,
+
+		NearFullIdleGridImportExitWatts:   cfg.NearFullIdleGridImportExitWatts,
+		NearFullIdleGridImportExitSamples: cfg.NearFullIdleGridImportExitSamples,
 	}
 
 	ctrl := controller.New(ctrlCfg, prom, mqtt, statusSrc, nil, m)

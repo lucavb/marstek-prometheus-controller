@@ -1503,6 +1503,13 @@ func nearFullIdleCfg(ctrl, start, end string) controller.Config {
 	cfg.NearFullIdleEnterPercent = 98
 	cfg.NearFullIdleExitPercent = 95
 	cfg.NearFullIdleConsecutiveSamples = 2
+	// Mirror production defaults. Tests that want to exercise the path set
+	// these explicitly; tests that don't care still pass because the raw
+	// grid values used for activation (50 W) sit at the threshold (strict
+	// `>` in step.go) and never accumulate, and single-cycle high-grid
+	// probes never reach the 8-sample debounce.
+	cfg.NearFullIdleGridImportExitWatts = 50
+	cfg.NearFullIdleGridImportExitSamples = 8
 	return cfg
 }
 
@@ -1661,6 +1668,166 @@ func TestStep_NearFullIdle_DoesNotDischargeOnGridImport(t *testing.T) {
 		last := pub.last()
 		if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
 			t.Errorf("import at SoC=99 in idle must not publish discharge; got %q", last)
+		}
+	}
+}
+
+// TestStep_NearFullIdle_ExitsOnSustainedGridImport verifies the secondary
+// "grid_import" exit reason breaks the SoC-deadlock: while idle is active,
+// sustained grid import above the threshold for N consecutive cycles exits
+// idle and lets normal control re-enable the slot, even though SoC has not
+// dropped below the SoC-exit threshold.
+func TestStep_NearFullIdle_ExitsOnSustainedGridImport(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	// Keep the debounce short so the test runs in a handful of cycles.
+	cfg.NearFullIdleGridImportExitSamples = 3
+	cfg.NearFullIdleGridImportExitWatts = 50
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Activate idle at SoC=98 with benign grid (=50, not > threshold).
+	for i := 0; i < 2; i++ {
+		p.set(50, 0)
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
+	}
+
+	// Feed NearFullIdleGridImportExitSamples - 1 cycles of grid above the
+	// threshold at SoC=99 (still in the near-full band, so SoC exit cannot
+	// fire). Slot must stay disabled through the debounce.
+	for i := 0; i < cfg.NearFullIdleGridImportExitSamples-1; i++ {
+		countBefore := pub.count()
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+		_ = c.Step(context.Background())
+		if pub.count() > countBefore {
+			last := pub.last()
+			if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+				t.Fatalf("cycle %d: idle must stay active during grid-import debounce; got %q", i, last)
+			}
+		}
+	}
+
+	// N-th consecutive high-import cycle: idle exits, normal control runs in
+	// the same cycle. Expected rawTarget = 0 (currentOutput) + 150 (smoothed)
+	// - ImportBiasWatts(0) = 150 W → slot enabled.
+	p.set(150, 0)
+	st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+	_ = c.Step(context.Background())
+	last := pub.last()
+	if !strings.Contains(last, ",a1=1,") {
+		t.Errorf("idle must exit on sustained grid import and re-enable slot; got %q", last)
+	}
+	if strings.Contains(last, ",v1=0,") {
+		t.Errorf("after grid_import exit, slot power must be non-zero; got %q", last)
+	}
+}
+
+// TestStep_NearFullIdle_TransientImportDoesNotExit verifies that a single
+// low-import cycle in the middle of a would-be exit sequence resets the
+// grid-import counter, so a transient spike (e.g. washing-machine pulse)
+// does not prematurely force idle off.
+func TestStep_NearFullIdle_TransientImportDoesNotExit(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.NearFullIdleGridImportExitSamples = 4
+	cfg.NearFullIdleGridImportExitWatts = 50
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Activate idle.
+	for i := 0; i < 2; i++ {
+		p.set(50, 0)
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
+	}
+
+	// 3 high-import cycles (counter climbs to 3, still below threshold 4).
+	for i := 0; i < 3; i++ {
+		p.set(200, 0)
+		st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+		_ = c.Step(context.Background())
+	}
+
+	// One low-import cycle → counter must reset to 0.
+	p.set(10, 0)
+	st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+	_ = c.Step(context.Background())
+
+	// 3 more high-import cycles should not yet trip the exit, since the
+	// counter restarted at 0. Slot must stay disabled.
+	for i := 0; i < 3; i++ {
+		countBefore := pub.count()
+		p.set(200, 0)
+		st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+		_ = c.Step(context.Background())
+		if pub.count() > countBefore {
+			last := pub.last()
+			if !strings.Contains(last, ",a1=0,") {
+				t.Fatalf("cycle %d: transient reset should prevent grid_import exit; got %q", i, last)
+			}
+		}
+	}
+
+	// 4th consecutive high sample → idle finally exits.
+	p.set(200, 0)
+	st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+	_ = c.Step(context.Background())
+	if !strings.Contains(pub.last(), ",a1=1,") {
+		t.Errorf("idle must exit after 4 fresh consecutive high-import samples; got %q", pub.last())
+	}
+}
+
+// TestStep_NearFullIdle_GridImportExitDisabledByZeroSamples verifies that
+// setting NearFullIdleGridImportExitSamples=0 turns off the new exit path
+// entirely, preserving the prior "SoC-only" behaviour for operators who
+// want the zero-risk rollback.
+func TestStep_NearFullIdle_GridImportExitDisabledByZeroSamples(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.NearFullIdleGridImportExitSamples = 0
+	cfg.NearFullIdleGridImportExitWatts = 50
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Activate idle.
+	for i := 0; i < 2; i++ {
+		p.set(50, 0)
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
+	}
+
+	// 50 sustained high-import cycles with SoC held at 99 (so the SoC exit
+	// path cannot fire). Idle must NOT exit.
+	for i := 0; i < 50; i++ {
+		countBefore := pub.count()
+		p.set(500, 0)
+		st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+		_ = c.Step(context.Background())
+		if pub.count() > countBefore {
+			last := pub.last()
+			if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+				t.Fatalf("cycle %d: grid-import exit disabled — slot must stay disabled; got %q", i, last)
+			}
 		}
 	}
 }

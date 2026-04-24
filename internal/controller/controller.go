@@ -74,6 +74,16 @@ type Config struct {
 	NearFullIdleEnterPercent       int
 	NearFullIdleExitPercent        int
 	NearFullIdleConsecutiveSamples int
+
+	// Secondary exit out of near-full idle based on sustained grid import.
+	// The SoC-based exit alone deadlocks at full charge when no discharge is
+	// happening (SoC cannot fall, so the exit threshold is never reached);
+	// when smoothed grid import exceeds NearFullIdleGridImportExitWatts for
+	// NearFullIdleGridImportExitSamples consecutive cycles, idle exits and
+	// normal control resumes, letting the battery cover house load.
+	// Samples=0 disables this exit path entirely.
+	NearFullIdleGridImportExitWatts   int
+	NearFullIdleGridImportExitSamples int
 }
 
 // Controller is the main control loop.
@@ -115,6 +125,12 @@ type Controller struct {
 	// nearFullIdleExitSamples counts consecutive active-state cycles where
 	// SoC < NearFullIdleExitPercent.
 	nearFullIdleExitSamples int
+	// nearFullIdleGridImportSamples counts consecutive active-state cycles
+	// where smoothed grid power exceeds NearFullIdleGridImportExitWatts. It
+	// feeds the secondary "grid_import" exit reason, which breaks the
+	// SoC-deadlock when solar drops below house load while the battery sits
+	// at full charge.
+	nearFullIdleGridImportSamples int
 
 	// transientZeroFiredLastCycle prevents the transient-zero-output guard from
 	// holding for more than one consecutive cycle.
@@ -191,6 +207,7 @@ func (c *Controller) resetNearFullIdleState(reason string) bool {
 	c.nearFullIdleActive = false
 	c.nearFullIdleEnterSamples = 0
 	c.nearFullIdleExitSamples = 0
+	c.nearFullIdleGridImportSamples = 0
 	if c.m != nil {
 		c.m.NearFullIdleActive.Set(0)
 		if wasActive {

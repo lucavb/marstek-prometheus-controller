@@ -183,7 +183,17 @@ func (c *Controller) Step(ctx context.Context) error {
 		return c.commandIdle(ctx, now, devStatus, "soc_floor")
 	}
 
-	// ── 2b. Near-full idle ───────────────────────────────────────────────────
+	// ── 2b. Smooth the grid power signal ─────────────────────────────────────
+	// Smoothing is updated every cycle (including while idle is active) so the
+	// near-full idle grid-import exit below sees the same smoothed value the
+	// rest of the control loop consumes, and so the smoothed gauge never
+	// freezes during idle.
+	smoothed := c.smooth(sample.Watts)
+	if c.m != nil {
+		c.m.SmoothedGridPowerWatts.Set(smoothed)
+	}
+
+	// ── 2c. Near-full idle ───────────────────────────────────────────────────
 	// Near the top of charge we deliberately disable the controlled slot rather
 	// than command any discharge. Excess PV is routed to the grid by the
 	// device's firmware surplus-feed-in path (Marstek app setting tc_dis=0),
@@ -193,6 +203,13 @@ func (c *Controller) Step(ctx context.Context) error {
 	// normal control runs instead. Entry and exit are each debounced by
 	// NearFullIdleConsecutiveSamples samples to ride through LFP top-end SoC
 	// flicker without flapping.
+	//
+	// A secondary "grid_import" exit breaks the SoC-deadlock: with the slot
+	// disabled, SoC cannot fall (no discharge), so the SoC exit path never
+	// fires when solar drops below house load. When smoothed grid import
+	// exceeds NearFullIdleGridImportExitWatts for
+	// NearFullIdleGridImportExitSamples consecutive cycles, idle exits and
+	// normal control resumes — the battery immediately begins covering load.
 	gatingOK := c.cfg.NearFullIdleEnabled && devStatus.SurplusFeedIn
 	if !gatingOK {
 		if c.nearFullIdleActive {
@@ -208,6 +225,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		} else {
 			c.nearFullIdleEnterSamples = 0
 			c.nearFullIdleExitSamples = 0
+			c.nearFullIdleGridImportSamples = 0
 		}
 	} else {
 		requiredSamples := c.cfg.NearFullIdleConsecutiveSamples
@@ -224,6 +242,7 @@ func (c *Controller) Step(ctx context.Context) error {
 				c.nearFullIdleActive = true
 				c.nearFullIdleEnterSamples = 0
 				c.nearFullIdleExitSamples = 0
+				c.nearFullIdleGridImportSamples = 0
 				if c.m != nil {
 					c.m.NearFullIdleActive.Set(1)
 					c.m.NearFullIdleEntered.Inc()
@@ -240,12 +259,28 @@ func (c *Controller) Step(ctx context.Context) error {
 			} else {
 				c.nearFullIdleExitSamples = 0
 			}
-			if c.nearFullIdleExitSamples >= requiredSamples {
-				c.resetNearFullIdleState("soc_exit")
+			gridExitEnabled := c.cfg.NearFullIdleGridImportExitSamples > 0
+			if gridExitEnabled && smoothed > float64(c.cfg.NearFullIdleGridImportExitWatts) {
+				c.nearFullIdleGridImportSamples++
+			} else {
+				c.nearFullIdleGridImportSamples = 0
+			}
+
+			exitReason := ""
+			switch {
+			case c.nearFullIdleExitSamples >= requiredSamples:
+				exitReason = "soc_exit"
+			case gridExitEnabled &&
+				c.nearFullIdleGridImportSamples >= c.cfg.NearFullIdleGridImportExitSamples:
+				exitReason = "grid_import"
+			}
+			if exitReason != "" {
+				c.resetNearFullIdleState(exitReason)
 				slog.Info("near-full idle deactivated",
 					"soc_pct", devStatus.SOCPercent,
 					"exit_pct", c.cfg.NearFullIdleExitPercent,
-					"reason", "soc_exit",
+					"smoothed_grid_watts", math.Round(smoothed),
+					"reason", exitReason,
 					"samples", requiredSamples)
 			}
 		}
@@ -257,7 +292,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		return c.commandIdle(ctx, now, devStatus, "near_full_idle")
 	}
 
-	// ── 2c. Transient-zero-output guard ──────────────────────────────────────
+	// ── 2d. Transient-zero-output guard ──────────────────────────────────────
 	// A single-cycle g1=g2=0 report while we were actively commanding output is
 	// a device reporting blip. Recomputing rawTarget from zero output causes a
 	// snap to MinOutputWatts=80. Hold the previous command for exactly one
@@ -279,13 +314,7 @@ func (c *Controller) Step(ctx context.Context) error {
 	}
 	c.transientZeroFiredLastCycle = false
 
-	// ── 3. Smooth the grid power signal ──────────────────────────────────────
-	smoothed := c.smooth(sample.Watts)
-	if c.m != nil {
-		c.m.SmoothedGridPowerWatts.Set(smoothed)
-	}
-
-	// ── 4. Compute raw target ─────────────────────────────────────────────────
+	// ── 3. Compute raw target ─────────────────────────────────────────────────
 	// The grid meter already reflects the battery's contribution, so using the
 	// raw grid reading as an absolute target causes the loop to converge to
 	// grid_ss = (load + bias)/2 rather than to bias.  The fix is to treat the
@@ -310,7 +339,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.m.TargetSlotPowerWatts.Set(float64(rawTarget))
 	}
 
-	// ── 5. Apply ramp and hold-time suppression ───────────────────────────────
+	// ── 4. Apply ramp and hold-time suppression ───────────────────────────────
 	ramped := c.applyRamp(c.lastCommandWatts, rawTarget)
 	// Export fast-path: if the grid is currently exporting (smoothed < 0) the
 	// ramp-down limit must not slow our response — every watt still discharging
@@ -367,7 +396,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		return nil
 	}
 
-	// ── 6. Publish the new schedule power ────────────────────────────────────
+	// ── 5. Publish the new schedule power ────────────────────────────────────
 	slots := marstek.SlotsAsWriteSlots(devStatus)
 	idx := c.cfg.ScheduleSlot - 1
 	// ramped==0 means "stop discharge"; the device ignores v=0 on an enabled
