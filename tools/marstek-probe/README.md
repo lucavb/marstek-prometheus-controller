@@ -123,6 +123,39 @@ If the SSID or password is wrong, the battery will drop off WiFi permanently unt
 
 Point the battery at a custom MQTT broker (or reset it back to the Marstek cloud). Used during initial provisioning of `hm2mqtt`. See `--help` for flags.
 
+### `send-ota-url` (destructive)
+
+Trigger an OTA update of the battery's **Wi-Fi communication module** (Quectel FC41D). The MCU accepts an HTTP URL over BLE command `0x24`, then forwards it to the FC41D via `AT+QWLANOTA=<URL>`. Use this to escape the 2023 FC41D firmware that has a WPA2 MIC-failure reconnection bug.
+
+```bash
+uv run tools/marstek-probe/ble_probe.py send-ota-url \
+    http://www.hamedata.com/app/download/neng/HM_HIE_FC41D_remote_ota.rbl
+```
+
+Note: firmware is served from **`www.hamedata.com`** (Alibaba Cloud CDN, `120.25.59.188:80`), *not* from `eu.hamedata.com` (the API host). Verify with:
+
+```bash
+curl -sSI http://www.hamedata.com/app/download/neng/HM_HIE_FC41D_remote_ota.rbl
+# expect: 200 OK, Content-Type: application/octet-stream, Content-Length: ~680KB
+```
+
+The first 4 bytes of the body should be the ASCII `RBL\0` Quectel container header.
+
+Add `--yes` to skip the interactive confirmation for automation.
+
+The battery goes offline for 1-3 minutes while the FC41D reflashes and reboots. The tool waits for a single-byte ack frame from the MCU (`[0x73 0x06 0x23 0x24 0x01 xor]` on accept, `[... 0x00 ...]` on reject) and reports the outcome. To confirm success afterwards, watch the `fc=` field in `mqtt_control.py status` — it should flip from `202310...` to a newer timestamp within ~2 minutes.
+
+Protocol details (reverse-engineered from the HMJ-2 MCU firmware `B2500_All_HMJ.bin`):
+
+- Frame: `[0x73][len=6+|URL|][0x23][0x24][0xAA][URL bytes][XOR]`
+- URL length: strictly less than 128 bytes, and must start with `http://`. The Quectel FC41D `AT+QWLANOTA` implementation only speaks plain HTTP — HTTPS URLs are rejected locally before transmission.
+- The 0xAA magic byte is mandatory; without it the MCU silently drops the frame
+- The OTA is only accepted when the "OTA armed" precondition at RAM `0x20007C3D` is non-zero. In practice the main state machine keeps this flag set during normal operation, so no explicit priming is required — but if the command is rejected with status byte `0x00`, wait for the device to answer a normal `cd=1` MQTT status query and retry.
+
+Tested 2026-04-24 against HMJ-2 `fc=202310231502` → `fc=202409090159`. The FC41D did **not** reassociate to the original AP after the reboot — Wi-Fi credentials had to be re-provisioned via `ble_probe.py set-wifi` before MQTT came back. Plan for a ~2-minute outage plus a follow-up Wi-Fi reconfigure step.
+
+> **Danger:** pointing the MCU at the wrong URL will flash whatever bytes are at that URL onto the FC41D. Only use `.rbl` images from the official `*.hamedata.com` CDN and matching the exact hardware variant (FC41D for B2500-D).
+
 ### Common flags
 
 - `--scan-timeout` BLE scan duration (default 10 s)

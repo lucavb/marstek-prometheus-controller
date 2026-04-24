@@ -14,13 +14,18 @@ tomquist/hmjs project and is the canonical way to configure these devices
 locally.
 
 Subcommands:
-    probe       scan + connect + send three read-only commands (DEVICE_INFO,
-                RUNTIME_INFO, CELL_INFO). Default if none given.
-    set-wifi    point the battery at an SSID/password (equivalent to the
-                Marstek app's WiFi setup step). Use this to recover a device
-                stuck in a WPA2 MIC-failure loop without opening the app.
-    set-mqtt    point the battery at a custom MQTT broker.
-    reset-mqtt  reset MQTT config back to the Marstek cloud.
+    probe          scan + connect + send three read-only commands (DEVICE_INFO,
+                   RUNTIME_INFO, CELL_INFO). Default if none given.
+    set-wifi       point the battery at an SSID/password (equivalent to the
+                   Marstek app's WiFi setup step). Use this to recover a device
+                   stuck in a WPA2 MIC-failure loop without opening the app.
+    set-mqtt       point the battery at a custom MQTT broker.
+    reset-mqtt     reset MQTT config back to the Marstek cloud.
+    send-ota-url   trigger a Wi-Fi (FC41D) communication-module OTA. The MCU
+                   forwards the URL to the FC41D via AT+QWLANOTA=<URL>. Use
+                   this to update the FC41D from the 202310xx firmware (which
+                   has the WPA2 MIC-failure bug) to a newer build from
+                   hamedata.com. See README "Troubleshooting" for details.
 
 Run it while physically near the battery (~10 m line of sight).
 
@@ -72,6 +77,23 @@ CMD_CELL_INFO = 0x0F
 CMD_SET_WIFI = 0x05
 CMD_SET_MQTT = 0x20
 CMD_RESET_MQTT = 0x21
+CMD_OTA_URL = 0x24
+
+# 0x24 payload prefix. Derived from firmware B2500_All_HMJ.bin @ 0x0800dce4
+# (ble_peer_event_handler, case 0x24): the handler expects the first payload
+# byte to equal 0xAA before copying the URL into the OTA buffer at RAM
+# 0x2000C9EF. Without the magic byte the command is silently dropped.
+CMD_OTA_MAGIC = 0xAA
+CMD_OTA_URL_MAX_LEN = 128  # firmware enforces (payload_len - 6) < 0x80
+
+# RAM addresses of the OTA state bytes, for documentation (not used here but
+# useful when reasoning about why a trigger may fail):
+#   0x20007C3D  "OTA armed" precondition; must be non-zero when 0x24 arrives.
+#               Set by the main state machine on certain control events.
+#   0x20007C43  "OTA trigger"; set by the 0x24 handler to kick the state
+#               machine into state 5, which then calls radio_ota_fsm().
+#   0x2000C9EF  128-byte URL buffer consumed by radio_ota_fsm() which emits
+#               AT+QWLANOTA=<URL> to the FC41D module.
 
 MQTT_FIELD_SEPARATOR = "<.,.>"
 
@@ -90,6 +112,52 @@ def build_mqtt_config_payload(
     sep = MQTT_FIELD_SEPARATOR
     cfg = f"{ssl_flag}{sep}{host}{sep}{port}{sep}{username}{sep}{password}{sep}"
     return cfg.encode("utf-8")
+
+
+def build_ota_url_payload(url: str) -> bytes:
+    """Build the 0x24 OTA payload: 0xAA magic byte + URL bytes.
+
+    The MCU's BLE handler requires the first payload byte to be 0xAA and
+    enforces an URL length below 128 bytes. The URL is forwarded verbatim
+    to the FC41D module via `AT+QWLANOTA=<url>`, so it must be a URL that
+    the FC41D can actually fetch over Wi-Fi (HTTP, not HTTPS, in practice).
+    """
+    if not url:
+        raise ValueError("OTA URL is required")
+    # The Quectel FC41D AT Commands Manual documents AT+QWLANOTA=<URL> with a
+    # plain-HTTP example and no mention of TLS; the FC41D modem does not ship
+    # with a CA bundle, so HTTPS URLs will be rejected downstream even if the
+    # MCU accepts them here. Fail early instead.
+    if not url.startswith("http://"):
+        raise ValueError(
+            "OTA URL must start with http:// (FC41D AT+QWLANOTA does not support HTTPS)"
+        )
+    encoded = url.encode("utf-8")
+    if len(encoded) > CMD_OTA_URL_MAX_LEN:
+        raise ValueError(
+            f"OTA URL is {len(encoded)} bytes; max is {CMD_OTA_URL_MAX_LEN}"
+        )
+    return bytes([CMD_OTA_MAGIC]) + encoded
+
+
+def parse_ota_ack(data: bytes) -> dict[str, Any] | None:
+    """Parse the single-byte ack the MCU returns after a 0x24 command.
+
+    Firmware shape (see FUN_0800ac50 + friends):
+        [0x73][len=0x06][0x23][0x24][status][xor]
+    where status is 0x01 on accept, 0x00 on reject (magic missing, URL too
+    long, or OTA-armed precondition 0x20007C3D still zero).
+    """
+    if len(data) < 6 or data[0] != START_BYTE or data[2] != IDENTIFIER_BYTE:
+        return None
+    if data[3] != CMD_OTA_URL:
+        return None
+    status = data[4]
+    return {
+        "accepted": status == 1,
+        "status_byte": status,
+        "raw": data.hex(),
+    }
 
 
 def build_wifi_config_payload(ssid: str, password: str) -> bytes:
@@ -708,6 +776,136 @@ async def run_set_wifi(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+async def send_ota_url_and_wait_ack(
+    address: str,
+    payload: bytes,
+    console: Console,
+    ack_timeout: float,
+) -> tuple[bool, dict[str, Any] | None, str | None]:
+    """Send the 0x24 OTA URL frame and capture the single-byte ack.
+
+    Returns (write_ok, parsed_ack, error_message).
+    """
+    tx = build_command(CMD_OTA_URL, payload)
+    console.print(
+        f"[dim]TX OTA_URL (0x24, {len(tx)} bytes, payload={len(payload)} bytes):[/dim] {tx.hex()}"
+    )
+
+    try:
+        async with BleakClient(address, timeout=15.0) as client:
+            if not client.is_connected:
+                return False, None, "bleak reports not connected"
+
+            notify_bucket: dict[str, Any] = {"responses": []}
+
+            def on_notify(_: Any, pkt: bytearray) -> None:
+                notify_bucket["responses"].append(bytes(pkt))
+
+            await client.start_notify(STATUS_CHARACTERISTIC_UUID, on_notify)
+            try:
+                await asyncio.sleep(0.3)
+                baseline = len(notify_bucket["responses"])
+                try:
+                    await client.write_gatt_char(
+                        COMMAND_CHARACTERISTIC_UUID, tx, response=False
+                    )
+                    await asyncio.sleep(0.1)
+                    await client.write_gatt_char(
+                        COMMAND_CHARACTERISTIC_UUID, tx, response=False
+                    )
+                except Exception as exc:
+                    return False, None, f"write failed: {exc}"
+
+                parsed: dict[str, Any] | None = None
+                deadline = time.perf_counter() + ack_timeout
+                while time.perf_counter() < deadline:
+                    await asyncio.sleep(0.1)
+                    new = notify_bucket["responses"][baseline:]
+                    if not new:
+                        continue
+                    joined = b"".join(new)
+                    parsed = parse_ota_ack(joined)
+                    if parsed is not None:
+                        break
+                return True, parsed, None
+            finally:
+                try:
+                    await client.stop_notify(STATUS_CHARACTERISTIC_UUID)
+                except Exception:
+                    pass
+    except Exception as exc:
+        return False, None, str(exc)
+
+
+async def run_send_ota_url(args: argparse.Namespace, console: Console) -> int:
+    try:
+        payload = build_ota_url_payload(args.url)
+    except ValueError as exc:
+        console.print(f"[red]invalid OTA URL: {exc}[/red]")
+        return 1
+
+    if not args.yes:
+        console.print(
+            "[yellow]This will trigger a Wi-Fi module (FC41D) OTA update. "
+            "The battery will go offline for 1-3 minutes while it flashes.[/yellow]\n"
+            f"URL: [bold]{args.url}[/bold]\n"
+            "[dim]Re-run with --yes to skip this confirmation.[/dim]"
+        )
+        try:
+            reply = input("Proceed? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("[red]aborted[/red]")
+            return 130
+        if reply not in ("y", "yes"):
+            console.print("[dim]aborted by user[/dim]")
+            return 0
+
+    target, _ = await select_target(args, console)
+    if target is None:
+        console.print("[red]No candidate BLE device found.[/red]")
+        return 1
+
+    console.print(
+        f"\n[bold]Target:[/bold] {target.name or '<unknown>'} ({target.address}) rssi={target.rssi}"
+    )
+
+    ok, ack, err = await send_ota_url_and_wait_ack(
+        target.address, payload, console, args.cmd_timeout
+    )
+    if not ok:
+        console.print(f"[red]OTA trigger failed: {err}[/red]")
+        return 2
+
+    if ack is None:
+        console.print(
+            "[yellow]No 0x24 ack received before timeout. The device may have "
+            "accepted the command anyway; watch `mqtt_control.py status` for the "
+            "`fc` field to change in the next 1-3 minutes.[/yellow]"
+        )
+        return 0
+
+    if ack["accepted"]:
+        console.print(
+            "[green]OTA accepted by the MCU[/green] — it has written the URL "
+            "into the FC41D URL buffer and set the OTA trigger flag.\n"
+            "[dim]The MCU will now emit AT+QWLANOTA=<url> to the FC41D. "
+            "Watch `mqtt_control.py status` for the `fc` field to flip to a "
+            "newer build number. On success the Wi-Fi module reboots and "
+            "MQTT reconnects within ~2 minutes.[/dim]"
+        )
+        return 0
+
+    console.print(
+        f"[red]OTA rejected[/red] (status byte = {ack['status_byte']}). "
+        "This usually means the OTA-armed precondition at RAM 0x20007C3D "
+        "is still zero. Try re-running the command a few seconds after the "
+        "device has replied to a normal MQTT `cd=1` status query — that "
+        "tends to nudge the MCU into a state where 0x24 is accepted. "
+        "If that still fails, the URL may exceed 128 bytes."
+    )
+    return 3
+
+
 async def run_reset_mqtt(args: argparse.Namespace, console: Console) -> int:
     target, _ = await select_target(args, console)
     if target is None:
@@ -823,6 +1021,29 @@ def main() -> int:
         help="WiFi password. If omitted, falls back to MARSTEK_WIFI_PASSWORD env var, then a tty prompt.",
     )
 
+    p_ota = sub.add_parser(
+        "send-ota-url",
+        help="trigger an FC41D Wi-Fi module OTA update via BLE command 0x24",
+        description=(
+            "Send the FC41D communication-module OTA URL to the battery via "
+            "BLE (command 0x24, 0xAA magic + URL, max 128 bytes). The MCU "
+            "forwards the URL to the Quectel FC41D via AT+QWLANOTA=<URL>. "
+            "Use this to patch a battery stuck on the 202310xx FC41D build "
+            "that has the WPA2 MIC-failure Wi-Fi reconnection bug."
+        ),
+    )
+    _add_common_ble_args(p_ota)
+    p_ota.add_argument(
+        "url",
+        metavar="URL",
+        help="HTTP URL to the .rbl firmware image (e.g. http://www.hamedata.com/app/download/neng/HM_HIE_FC41D_remote_ota.rbl). HTTPS is not supported by the FC41D.",
+    )
+    p_ota.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip interactive confirmation (for scripting)",
+    )
+
     args = parser.parse_args()
     if args.cmd is None:
         args = parser.parse_args(["probe", *sys.argv[1:]])
@@ -839,6 +1060,9 @@ def main() -> int:
         if args.cmd == "set-wifi":
             console.rule("Marstek BLE: SET_WIFI")
             return asyncio.run(run_set_wifi(args, console))
+        if args.cmd == "send-ota-url":
+            console.rule("Marstek BLE: OTA_URL")
+            return asyncio.run(run_send_ota_url(args, console))
 
         console.rule("Marstek BLE probe")
         report = asyncio.run(run(args, console))
