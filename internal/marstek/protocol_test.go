@@ -20,6 +20,24 @@ func TestRestartPayload(t *testing.T) {
 	}
 }
 
+func TestBuildSurplusFeedInPayload(t *testing.T) {
+	tests := []struct {
+		name   string
+		enable bool
+		want   string
+	}{
+		{name: "enable", enable: true, want: "cd=31,touchuan_disa=0"},
+		{name: "disable", enable: false, want: "cd=31,touchuan_disa=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := marstek.BuildSurplusFeedInPayload(tt.enable); got != tt.want {
+				t.Errorf("BuildSurplusFeedInPayload(%v) = %q, want %q", tt.enable, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTopics(t *testing.T) {
 	ctrl := marstek.ControlTopic("HMJ-2", "60323bd14b6e")
 	want := "hame_energy/HMJ-2/App/60323bd14b6e/ctrl"
@@ -105,6 +123,8 @@ func TestParseStatus_RealPayload(t *testing.T) {
 		{"OutputThresholdWatts", s.OutputThresholdWatts, 240},
 		{"Solar1Watts", s.Solar1Watts, 375},
 		{"Solar2Watts", s.Solar2Watts, 380},
+		{"Solar1Mode", s.Solar1Mode, 1},
+		{"Solar2Mode", s.Solar2Mode, 1},
 		{"FirmwareMajor", s.FirmwareMajor, 110},
 		{"FirmwareSub", s.FirmwareSub, 9},
 		{"Bootloader", s.Bootloader, 107},
@@ -128,11 +148,36 @@ func TestParseStatus_RealPayload(t *testing.T) {
 	if s.SurplusFeedIn {
 		t.Error("SurplusFeedIn should be false (tc_dis=1)")
 	}
+	if s.PassThroughActive() {
+		t.Error("PassThroughActive should be false for p1=1,p2=1")
+	}
 	if !s.Slots[0].Enabled {
 		t.Error("Slot 1 should be enabled (d1=1)")
 	}
 	if s.Slots[1].Enabled {
 		t.Error("Slot 2 should be disabled (d2=0)")
+	}
+}
+
+func TestStatus_PassThroughActive(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{name: "both pass through", payload: "p1=2,p2=2", want: true},
+		{name: "mixed charging and pass through", payload: "p1=3,p2=1", want: true},
+		{name: "one input pass through", payload: "p1=0,p2=2", want: true},
+		{name: "charging only", payload: "p1=1,p2=1", want: false},
+		{name: "missing fields", payload: "pe=100", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := marstek.ParseStatus(tt.payload)
+			if got := s.PassThroughActive(); got != tt.want {
+				t.Errorf("PassThroughActive() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

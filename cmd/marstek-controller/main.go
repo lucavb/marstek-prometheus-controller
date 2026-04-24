@@ -124,6 +124,7 @@ func run() error {
 		ScheduleStart:                 cfg.ScheduleStart,
 		ScheduleEnd:                   cfg.ScheduleEnd,
 		PersistToFlash:                cfg.PersistToFlash,
+		AllowFlashWrites:              cfg.AllowFlashWrites,
 
 		BatterySoCFloorMarginPercent:   cfg.BatterySoCFloorMarginPercent,
 		BatterySoCHysteresisPercent:    cfg.BatterySoCHysteresisPercent,
@@ -136,6 +137,12 @@ func run() error {
 
 		NearFullIdleGridImportExitWatts:   cfg.NearFullIdleGridImportExitWatts,
 		NearFullIdleGridImportExitSamples: cfg.NearFullIdleGridImportExitSamples,
+
+		PassthroughStallDetectCycles:        cfg.PassthroughStallDetectCycles,
+		PassthroughStallMinCommandWatts:     cfg.PassthroughStallMinCommandWatts,
+		PassthroughAutoRecovery:             cfg.PassthroughAutoRecovery,
+		PassthroughAutoRecoveryMinInterval:  cfg.PassthroughAutoRecoveryMinInterval,
+		PassthroughAutoRecoveryRestoreDelay: cfg.PassthroughAutoRecoveryRestoreDelay,
 	}
 
 	ctrl := controller.New(ctrlCfg, prom, mqtt, statusSrc, nil, m)

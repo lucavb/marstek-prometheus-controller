@@ -73,6 +73,18 @@ func (f *fakePublisher) count() int {
 	return len(f.payloads)
 }
 
+func (f *fakePublisher) countContaining(needle string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, payload := range f.payloads {
+		if strings.Contains(payload, needle) {
+			count++
+		}
+	}
+	return count
+}
+
 type fakeStatus struct {
 	mu          sync.Mutex
 	status      marstek.Status
@@ -142,25 +154,29 @@ func freshDevStatus() marstek.Status {
 
 func defaultCfg(ctrl, start, end string) controller.Config {
 	return controller.Config{
-		PrometheusStaleAfter:          60 * time.Second,
-		StatusStaleAfter:              2 * time.Minute,
-		StatusPollTimeout:             5 * time.Second,
-		StatusHardFailAfter:           5 * time.Minute,
-		ControlInterval:               15 * time.Second,
-		SmoothingAlpha:                1.0, // no smoothing in tests for determinism
-		DeadbandWatts:                 25,
-		RampUpWattsPerCycle:           800, // effectively no ramp in unit tests
-		RampDownWattsPerCycle:         800,
-		MinCommandDeltaWatts:          1,
-		MinCommandDeltaWattsExporting: 0,
-		MinHoldTime:                   0,
-		MinOutputWatts:                80,
-		MaxOutputWatts:                800,
-		ControlTopic:                  ctrl,
-		ScheduleSlot:                  1,
-		ScheduleStart:                 start,
-		ScheduleEnd:                   end,
-		PersistToFlash:                false,
+		PrometheusStaleAfter:                60 * time.Second,
+		StatusStaleAfter:                    2 * time.Minute,
+		StatusPollTimeout:                   5 * time.Second,
+		StatusHardFailAfter:                 5 * time.Minute,
+		ControlInterval:                     15 * time.Second,
+		SmoothingAlpha:                      1.0, // no smoothing in tests for determinism
+		DeadbandWatts:                       25,
+		RampUpWattsPerCycle:                 800, // effectively no ramp in unit tests
+		RampDownWattsPerCycle:               800,
+		MinCommandDeltaWatts:                1,
+		MinCommandDeltaWattsExporting:       0,
+		MinHoldTime:                         0,
+		MinOutputWatts:                      80,
+		MaxOutputWatts:                      800,
+		ControlTopic:                        ctrl,
+		ScheduleSlot:                        1,
+		ScheduleStart:                       start,
+		ScheduleEnd:                         end,
+		PersistToFlash:                      false,
+		PassthroughStallDetectCycles:        5,
+		PassthroughStallMinCommandWatts:     80,
+		PassthroughAutoRecoveryMinInterval:  time.Hour,
+		PassthroughAutoRecoveryRestoreDelay: 5 * time.Minute,
 	}
 }
 
@@ -1479,6 +1495,17 @@ func devStatusAtSoC(socPct, solarW1, solarW2, g1, g2 int) marstek.Status {
 	))
 }
 
+func devStatusAtSoCPassThrough(socPct, solarW1, solarW2, g1, g2 int) marstek.Status {
+	return marstek.ParseStatus(fmt.Sprintf(
+		"p1=2,p2=2,w1=%d,w2=%d,pe=%d,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=80,"+
+			"lv=240,cj=0,kn=2240,g1=%d,g2=%d,b1=0,b2=0,md=0,"+
+			"d1=1,e1=0:0,f1=23:59,h1=247,d2=0,e2=0:0,f2=23:59,h2=80,"+
+			"d3=0,e3=0:0,f3=23:59,h3=80,d4=0,e4=0:0,f4=23:59,h4=80,"+
+			"d5=0,e5=0:0,f5=23:59,h5=80,lmo=2029,lmi=293,lmf=1,uv=107,sm=0,bn=0,ct_t=7,tc_dis=0",
+		solarW1, solarW2, socPct, g1, g2,
+	))
+}
+
 // devStatusAtSoCNoFeedIn is the same as devStatusAtSoC but with tc_dis=1
 // (SurplusFeedIn=false) so near-full idle is gated off.
 func devStatusAtSoCNoFeedIn(socPct, solarW1, solarW2, g1, g2 int) marstek.Status {
@@ -2101,6 +2128,302 @@ func TestStep_NearFullIdle_NoFlapAfterGridImportExit(t *testing.T) {
 		if strings.Contains(last, ",a1=0,") && strings.Contains(last, ",v1=0,") {
 			t.Fatalf("cycle %d after grid_import exit: idle must not re-engage while grid is importing; got %q", i, last)
 		}
+	}
+}
+
+func TestStep_NearFullIdle_EntersAtFullWithSolarSurplus(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Fatalf("full SOC with solar surplus should enter idle/pass-through; got %q", last)
+	}
+	if pub.countContaining("cd=31") != 0 {
+		t.Fatalf("solar surplus should not trigger recovery; payloads with cd=31 = %d", pub.countContaining("cd=31"))
+	}
+}
+
+func TestStep_NearFullIdle_StaysInPassthroughWhenSolarCoversLoad(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	countAfterEntry := pub.count()
+
+	for i := 0; i < 10; i++ {
+		p.set(-20, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
+		_ = c.Step(context.Background())
+	}
+
+	if pub.count() != countAfterEntry {
+		t.Fatalf("pass-through with solar covering load should not publish chatter; got %d publishes after entry, want %d", pub.count(), countAfterEntry)
+	}
+	if pub.countContaining("cd=31") != 0 {
+		t.Fatalf("solar-covering pass-through should not toggle surplus feed-in")
+	}
+}
+
+func TestStep_NearFullIdle_DoesNotGridImportExitWhileFirmwarePassthroughActive(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.NearFullIdleGridImportExitSamples = 3
+	cfg.PassthroughStallDetectCycles = 5
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	countAfterEntry := pub.count()
+
+	for i := 0; i < 10; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+		_ = c.Step(context.Background())
+		last := pub.last()
+		if strings.Contains(last, ",a1=1,") && !strings.Contains(last, "cd=31") {
+			t.Fatalf("cycle %d: grid_import exit must not publish futile timed-discharge write during pass-through; got %q", i, last)
+		}
+	}
+
+	if pub.count() != countAfterEntry {
+		t.Fatalf("pass-through grid import should not publish timed-discharge chatter; got %d publishes, want %d", pub.count(), countAfterEntry)
+	}
+}
+
+func TestStep_PassthroughRecovery_DisabledObserveOnly(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 2
+	cfg.PassthroughAutoRecovery = false
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	for i := 0; i < cfg.PassthroughStallDetectCycles+2; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+		_ = c.Step(context.Background())
+	}
+
+	if pub.countContaining("cd=31") != 0 {
+		t.Fatalf("recovery disabled should not publish cd=31; got %d", pub.countContaining("cd=31"))
+	}
+}
+
+func TestStep_PassthroughRecovery_BlockedWithoutFlashGuard(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 2
+	cfg.PassthroughAutoRecovery = true
+	cfg.AllowFlashWrites = false
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	for i := 0; i < cfg.PassthroughStallDetectCycles+2; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+		_ = c.Step(context.Background())
+	}
+
+	if pub.countContaining("cd=31") != 0 {
+		t.Fatalf("flash guard should block recovery writes; got %d cd=31 publishes", pub.countContaining("cd=31"))
+	}
+}
+
+func TestStep_PassthroughRecovery_DisablesSurplusFeedInOnce(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 2
+	cfg.PassthroughAutoRecovery = true
+	cfg.AllowFlashWrites = true
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	for i := 0; i < cfg.PassthroughStallDetectCycles+4; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+		_ = c.Step(context.Background())
+	}
+
+	if got := pub.countContaining("cd=31,touchuan_disa=1"); got != 1 {
+		t.Fatalf("auto-recovery should disable surplus feed-in exactly once, got %d", got)
+	}
+}
+
+func TestStep_PassthroughRecovery_NormalControlRunsAfterDisable(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 2
+	cfg.PassthroughAutoRecovery = true
+	cfg.AllowFlashWrites = true
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	for i := 0; i < cfg.PassthroughStallDetectCycles; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+		_ = c.Step(context.Background())
+	}
+	if got := pub.countContaining("cd=31,touchuan_disa=1"); got != 1 {
+		t.Fatalf("precondition: expected one disable command, got %d", got)
+	}
+
+	p.set(150, 0)
+	st.setFresh(devStatusAtSoCNoFeedIn(100, 150, 150, 0, 0))
+	_ = c.Step(context.Background())
+	last := pub.last()
+	if !strings.Contains(last, ",a1=1,") || !strings.Contains(last, ",v1=150,") {
+		t.Fatalf("after pass-through clears, normal timed-discharge control should run; got %q", last)
+	}
+}
+
+func TestStep_PassthroughRecovery_RestoresWhenBatteryLeavesFullPlateau(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 2
+	cfg.PassthroughAutoRecovery = true
+	cfg.AllowFlashWrites = true
+	cfg.PassthroughAutoRecoveryRestoreDelay = time.Hour
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	for i := 0; i < cfg.PassthroughStallDetectCycles; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+		_ = c.Step(context.Background())
+	}
+
+	p.set(0, 0)
+	st.setFresh(devStatusAtSoCNoFeedIn(94, 0, 0, 80, 80))
+	_ = c.Step(context.Background())
+	if got := pub.countContaining("cd=31,touchuan_disa=0"); got != 1 {
+		t.Fatalf("SOC below near-full exit should restore surplus feed-in once, got %d", got)
+	}
+}
+
+func TestStep_PassthroughRecovery_RateLimitsRepeatedEvents(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 1
+	cfg.PassthroughAutoRecovery = true
+	cfg.AllowFlashWrites = true
+	cfg.PassthroughAutoRecoveryMinInterval = time.Hour
+	cfg.PassthroughAutoRecoveryRestoreDelay = 0
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	p.set(150, 0)
+	st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+	_ = c.Step(context.Background())
+	p.set(0, 0)
+	st.setFresh(devStatusAtSoCNoFeedIn(94, 0, 0, 80, 80))
+	_ = c.Step(context.Background())
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	p.set(150, 0)
+	st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+	_ = c.Step(context.Background())
+
+	if got := pub.countContaining("cd=31,touchuan_disa=1"); got != 1 {
+		t.Fatalf("second recovery inside min interval must be rate-limited; disable count = %d", got)
+	}
+}
+
+func TestStep_PassthroughRecovery_DoesNotRestoreIfNotControllerDisabled(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughAutoRecovery = true
+	cfg.AllowFlashWrites = true
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	p.set(0, 0)
+	st.setFresh(devStatusAtSoCNoFeedIn(100, 0, 0, 0, 0))
+	_ = c.Step(context.Background())
+	if got := pub.countContaining("cd=31,touchuan_disa=0"); got != 0 {
+		t.Fatalf("controller must not restore surplus feed-in unless it disabled it; got %d restore writes", got)
 	}
 }
 

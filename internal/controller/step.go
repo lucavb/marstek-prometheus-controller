@@ -108,6 +108,14 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.m.DeviceLastStatusSecs.Set(statusAge.Seconds())
 		c.m.LastStatusAgeSecs.Set(statusAge.Seconds())
 	}
+	passThroughActive := devStatus.PassThroughActive()
+	if c.m != nil {
+		passThroughVal := 0.0
+		if passThroughActive {
+			passThroughVal = 1.0
+		}
+		c.m.PassthroughActive.Set(passThroughVal)
+	}
 
 	// Capture the previous status before overwriting — the transient-zero guard
 	// below needs to compare the current output against what was reported last
@@ -159,6 +167,9 @@ func (c *Controller) Step(ctx context.Context) error {
 		if c.cfg.NearFullIdleEnabled && !devStatus.SurplusFeedIn {
 			slog.Warn("near-full idle is enabled but surplus feed-in is disabled in the app (tc_dis=1); idle will not engage until surplus feed-in is re-enabled, otherwise PV would be stranded at full SoC")
 		}
+		if c.cfg.PassthroughAutoRecovery && !devStatus.SurplusFeedIn && !c.surplusFeedInDisabledByController {
+			slog.Warn("pass-through auto-recovery is enabled but surplus feed-in is already disabled; controller will not restore a setting it did not change")
+		}
 	}
 
 	if c.m != nil {
@@ -168,7 +179,6 @@ func (c *Controller) Step(ctx context.Context) error {
 		}
 		c.m.SurplusFeedInEnabled.Set(surplusVal)
 	}
-
 	if c.socFloorActive {
 		slog.Debug("soc below soft floor, suppressing discharge",
 			"soc_pct", devStatus.SOCPercent,
@@ -180,6 +190,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		// controller is operating normally (same logic as deadband suppression).
 		c.ready = true
 		c.transientZeroFiredLastCycle = false
+		c.resetPassthroughStall()
 		return c.commandIdle(ctx, now, devStatus, "soc_floor")
 	}
 
@@ -191,6 +202,9 @@ func (c *Controller) Step(ctx context.Context) error {
 	smoothed := c.smooth(sample.Watts)
 	if c.m != nil {
 		c.m.SmoothedGridPowerWatts.Set(smoothed)
+	}
+	if err := c.maybeRestoreSurplusFeedIn(now, devStatus, smoothed); err != nil {
+		return err
 	}
 
 	// ── 2c. Near-full idle ───────────────────────────────────────────────────
@@ -273,7 +287,7 @@ func (c *Controller) Step(ctx context.Context) error {
 			} else {
 				c.nearFullIdleExitSamples = 0
 			}
-			gridExitEnabled := c.cfg.NearFullIdleGridImportExitSamples > 0
+			gridExitEnabled := c.cfg.NearFullIdleGridImportExitSamples > 0 && !passThroughActive
 			if gridExitEnabled && smoothed > float64(c.cfg.NearFullIdleGridImportExitWatts) {
 				c.nearFullIdleGridImportSamples++
 			} else {
@@ -301,6 +315,26 @@ func (c *Controller) Step(ctx context.Context) error {
 	}
 
 	if c.nearFullIdleActive {
+		currentOutput := devStatus.Output1Watts + devStatus.Output2Watts
+		idleTarget := currentOutput + int(math.Round(smoothed)) - c.cfg.ImportBiasWatts
+		if idleTarget < 0 {
+			idleTarget = 0
+		}
+		if idleTarget > c.cfg.MaxOutputWatts {
+			idleTarget = c.cfg.MaxOutputWatts
+		}
+		if idleTarget > 0 && idleTarget < c.cfg.MinOutputWatts {
+			idleTarget = c.cfg.MinOutputWatts
+		}
+		recoveryStarted, err := c.maybeHandlePassthroughStall(ctx, now, devStatus, smoothed, idleTarget)
+		if err != nil {
+			return err
+		}
+		if recoveryStarted {
+			c.resetNearFullIdleState("passthrough_recovery")
+			c.ready = true
+			return nil
+		}
 		c.ready = true
 		c.transientZeroFiredLastCycle = false
 		return c.commandIdle(ctx, now, devStatus, "near_full_idle")
@@ -351,6 +385,14 @@ func (c *Controller) Step(ctx context.Context) error {
 
 	if c.m != nil {
 		c.m.TargetSlotPowerWatts.Set(float64(rawTarget))
+	}
+	recoveryStarted, err := c.maybeHandlePassthroughStall(ctx, now, devStatus, smoothed, rawTarget)
+	if err != nil {
+		return err
+	}
+	if recoveryStarted {
+		c.ready = true
+		return nil
 	}
 
 	// ── 4. Apply ramp and hold-time suppression ───────────────────────────────

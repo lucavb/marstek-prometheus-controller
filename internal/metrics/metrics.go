@@ -69,6 +69,12 @@ type Metrics struct {
 	// Device feed-in flag mirrored from device status (tc_dis)
 	SurplusFeedInEnabled prometheus.Gauge // 1 when tc_dis=0 (feed-in enabled), 0 when tc_dis=1
 
+	// Firmware pass-through and recovery
+	PassthroughActive         prometheus.Gauge       // 1 when p1/p2 indicate firmware pass-through
+	PassthroughStallDetected  prometheus.Counter     // rising edges of pass-through stalls
+	PassthroughRecoveryTotal  *prometheus.CounterVec // label: outcome (started|blocked_flash_guard|rate_limited|publish_error|restored)
+	SurplusFeedInToggledTotal *prometheus.CounterVec // label: direction (disable|restore)
+
 	// Scheduled device restart (opt-in; only emitted when DEVICE_RESTART_SCHEDULE is set).
 	// DeviceRestartInfo is a labeled gauge (value always 1) exposing the active
 	// schedule config. It is a GaugeVec so that no samples are emitted at all
@@ -189,6 +195,11 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		NearFullIdleExitReasonTotal: newCounterVec("near_full_idle_exit_reason_total", "Reason-specific near-full idle exits.", []string{"reason"}),
 
 		SurplusFeedInEnabled: newGauge("surplus_feed_in_enabled", "1 when the device has surplus feed-in enabled (tc_dis=0); 0 when disabled (tc_dis=1). Mirrors the device status flag."),
+
+		PassthroughActive:         newGauge("passthrough_active", "1 when device status p1/p2 indicate firmware solar pass-through mode; 0 otherwise."),
+		PassthroughStallDetected:  newCounter("passthrough_stall_detected_total", "Pass-through stall events detected on the rising edge."),
+		PassthroughRecoveryTotal:  newCounterVec("passthrough_recovery_total", "Pass-through recovery actions by outcome.", []string{"outcome"}),
+		SurplusFeedInToggledTotal: newCounterVec("surplus_feedin_toggled_total", "Automatic surplus-feed-in toggles by direction.", []string{"direction"}),
 
 		// Scheduled device restart metrics. DeviceRestartInfo is a GaugeVec so
 		// that no samples are emitted when the feature is disabled (opt-in).

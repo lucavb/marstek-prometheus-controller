@@ -18,6 +18,7 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	if c.resetNearFullIdleState("fallback") {
 		slog.Info("near-full idle deactivated", "reason", "fallback")
 	}
+	c.resetPassthroughStall()
 
 	if c.lastCommandWatts == 0 {
 		return nil

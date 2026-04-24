@@ -236,3 +236,83 @@ func TestLoad_MinCommandDeltaMalformed_FallsBackToDefault(t *testing.T) {
 		t.Errorf("MinCommandDeltaWattsExporting = %d, want fallback 5", cfg.MinCommandDeltaWattsExporting)
 	}
 }
+
+func TestLoad_PassthroughRecoveryDefaults(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.PassthroughAutoRecovery {
+		t.Error("PassthroughAutoRecovery default = true, want false")
+	}
+	if cfg.PassthroughStallDetectCycles != 5 {
+		t.Errorf("PassthroughStallDetectCycles = %d, want 5", cfg.PassthroughStallDetectCycles)
+	}
+	if cfg.PassthroughStallMinCommandWatts != cfg.MinOutputWatts {
+		t.Errorf("PassthroughStallMinCommandWatts = %d, want MinOutputWatts %d", cfg.PassthroughStallMinCommandWatts, cfg.MinOutputWatts)
+	}
+}
+
+func TestLoad_PassthroughRecoveryAllowsFlashGuardToBeEnabledSeparately(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PASSTHROUGH_AUTO_RECOVERY", "true")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if !cfg.PassthroughAutoRecovery {
+		t.Error("PassthroughAutoRecovery = false, want true")
+	}
+	if cfg.AllowFlashWrites {
+		t.Error("AllowFlashWrites should remain false unless ALLOW_FLASH_WRITES is explicitly set")
+	}
+}
+
+func TestLoad_PassthroughRecoveryRejectsNegativeValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		envKey  string
+		value   string
+		wantMsg string
+	}{
+		{
+			name:    "detect cycles",
+			envKey:  "PASSTHROUGH_STALL_DETECT_CYCLES",
+			value:   "-1",
+			wantMsg: "PASSTHROUGH_STALL_DETECT_CYCLES must be >= 0",
+		},
+		{
+			name:    "min command watts",
+			envKey:  "PASSTHROUGH_STALL_MIN_COMMAND_WATTS",
+			value:   "-1",
+			wantMsg: "PASSTHROUGH_STALL_MIN_COMMAND_WATTS must be >= 0",
+		},
+		{
+			name:    "min interval",
+			envKey:  "PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL",
+			value:   "-1s",
+			wantMsg: "PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL must be >= 0",
+		},
+		{
+			name:    "restore delay",
+			envKey:  "PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY",
+			value:   "-1s",
+			wantMsg: "PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY must be >= 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv(tc.envKey, tc.value)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("Load() expected error for negative value, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}

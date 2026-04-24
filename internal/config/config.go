@@ -92,6 +92,17 @@ type Config struct {
 	NearFullIdleGridImportExitWatts   int
 	NearFullIdleGridImportExitSamples int
 
+	// Pass-through stall detection and opt-in recovery. At full SoC with
+	// surplus feed-in enabled, the B2500 firmware can enter pass-through and
+	// ignore timed-discharge slots. Detection is always safe; auto-recovery
+	// publishes the flash-only cd=31 surplus-feed-in command and is therefore
+	// additionally gated in the controller by AllowFlashWrites.
+	PassthroughStallDetectCycles        int
+	PassthroughStallMinCommandWatts     int
+	PassthroughAutoRecovery             bool
+	PassthroughAutoRecoveryMinInterval  time.Duration
+	PassthroughAutoRecoveryRestoreDelay time.Duration
+
 	// Scheduled device restart — opt-in workaround for a device that hangs
 	// periodically. Empty schedule disables the feature entirely.
 	DeviceRestartSchedule string         // DEVICE_RESTART_SCHEDULE: 5-field cron, e.g. "0 3 * * *"
@@ -153,7 +164,16 @@ func Load() (Config, error) {
 		NearFullIdleGridImportExitWatts:   getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS", 50),
 		NearFullIdleGridImportExitSamples: getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", 8),
 
+		PassthroughStallDetectCycles:        getEnvInt("PASSTHROUGH_STALL_DETECT_CYCLES", 5),
+		PassthroughStallMinCommandWatts:     getEnvInt("PASSTHROUGH_STALL_MIN_COMMAND_WATTS", 80),
+		PassthroughAutoRecovery:             getEnvBool("PASSTHROUGH_AUTO_RECOVERY", false),
+		PassthroughAutoRecoveryMinInterval:  getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL", time.Hour),
+		PassthroughAutoRecoveryRestoreDelay: getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY", 5*time.Minute),
+
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
+	}
+	if _, ok := os.LookupEnv("PASSTHROUGH_STALL_MIN_COMMAND_WATTS"); !ok {
+		cfg.PassthroughStallMinCommandWatts = cfg.MinOutputWatts
 	}
 
 	// Parse timezone only when a schedule is configured. This keeps the
@@ -255,6 +275,18 @@ func (c *Config) validate() error {
 	}
 	if c.NearFullIdleGridImportExitSamples < 0 {
 		errs = append(errs, "NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES must be >= 0 (0 disables the grid-import exit path)")
+	}
+	if c.PassthroughStallDetectCycles < 0 {
+		errs = append(errs, "PASSTHROUGH_STALL_DETECT_CYCLES must be >= 0 (0 disables pass-through stall detection)")
+	}
+	if c.PassthroughStallMinCommandWatts < 0 {
+		errs = append(errs, "PASSTHROUGH_STALL_MIN_COMMAND_WATTS must be >= 0")
+	}
+	if c.PassthroughAutoRecoveryMinInterval < 0 {
+		errs = append(errs, "PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL must be >= 0")
+	}
+	if c.PassthroughAutoRecoveryRestoreDelay < 0 {
+		errs = append(errs, "PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY must be >= 0")
 	}
 
 	if c.DeviceRestartSchedule != "" {

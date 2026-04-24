@@ -48,6 +48,11 @@ const CDPersist = 7
 // controller republishes the timed-discharge slot on the next control cycle.
 const CDRestart = 10
 
+// CDSurplusFeedIn is the command code for the surplus-feed-in setting.
+// The device protocol exposes only this persistent/flash variant; there is no
+// volatile counterpart for tc_dis/touchuan_disa.
+const CDSurplusFeedIn = 31
+
 // RestartPayload is the MQTT payload that triggers a device software restart.
 const RestartPayload = "cd=10"
 
@@ -103,6 +108,17 @@ func BuildTimedDischargePayload(slots [5]Slot, flash bool) string {
 	return b.String()
 }
 
+// BuildSurplusFeedInPayload builds the flash-only command that toggles the
+// device's surplus-feed-in setting. enable=true writes tc_dis=0, enable=false
+// writes tc_dis=1 (the protocol field is inverted and named touchuan_disa).
+func BuildSurplusFeedInPayload(enable bool) string {
+	value := 1
+	if enable {
+		value = 0
+	}
+	return fmt.Sprintf("cd=%d,touchuan_disa=%d", CDSurplusFeedIn, value)
+}
+
 // Status holds the parsed fields from a device status payload (cd=1 response).
 // Field names correspond directly to the protocol keys; see the plan for the
 // full key mapping. Only fields relevant to the controller are populated.
@@ -129,6 +145,8 @@ type Status struct {
 	// Solar inputs
 	Solar1Watts int // w1
 	Solar2Watts int // w2
+	Solar1Mode  int // p1: bit0=charging, bit1=pass-through
+	Solar2Mode  int // p2: bit0=charging, bit1=pass-through
 
 	// Device info
 	FirmwareMajor    int  // vv
@@ -144,6 +162,13 @@ type Status struct {
 	// DischargeSettingsCode is the device's current cd= value in the status
 	// payload. This is NOT the write-side command code — it shadows the concept.
 	DischargeSettingsCode int // cd (in read payload)
+}
+
+// PassThroughActive reports whether either solar input is in firmware
+// pass-through/bypass mode. The p1/p2 mode fields are bit flags: bit 0 means
+// charging, bit 1 means pass-through.
+func (s Status) PassThroughActive() bool {
+	return s.Solar1Mode&2 != 0 || s.Solar2Mode&2 != 0
 }
 
 // ReadSlot is one timed-discharge period as returned by the device (cd=1).
@@ -174,6 +199,8 @@ func ParseStatus(payload string) Status {
 	s.OutputThresholdWatts = intField(m, "lv")
 	s.Solar1Watts = intField(m, "w1")
 	s.Solar2Watts = intField(m, "w2")
+	s.Solar1Mode = intField(m, "p1")
+	s.Solar2Mode = intField(m, "p2")
 	s.FirmwareMajor = intField(m, "vv")
 	s.FirmwareSub = intField(m, "sv")
 	s.Bootloader = intField(m, "uv")

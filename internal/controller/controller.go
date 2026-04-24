@@ -57,7 +57,8 @@ type Config struct {
 	ScheduleEnd   string // HH:MM
 
 	// Flash writes
-	PersistToFlash bool
+	PersistToFlash   bool
+	AllowFlashWrites bool
 
 	// Battery SoC soft floor — prevents commanding discharge when the BMS will
 	// gate us anyway (see AGENTS.md "Don't fight the BMS").
@@ -84,6 +85,15 @@ type Config struct {
 	// Samples=0 disables this exit path entirely.
 	NearFullIdleGridImportExitWatts   int
 	NearFullIdleGridImportExitSamples int
+
+	// Pass-through stall detection and opt-in recovery. Auto-recovery publishes
+	// the device's flash-only surplus-feed-in command, so AllowFlashWrites must
+	// also be true before any recovery write is attempted.
+	PassthroughStallDetectCycles        int
+	PassthroughStallMinCommandWatts     int
+	PassthroughAutoRecovery             bool
+	PassthroughAutoRecoveryMinInterval  time.Duration
+	PassthroughAutoRecoveryRestoreDelay time.Duration
 }
 
 // Controller is the main control loop.
@@ -135,6 +145,15 @@ type Controller struct {
 	// transientZeroFiredLastCycle prevents the transient-zero-output guard from
 	// holding for more than one consecutive cycle.
 	transientZeroFiredLastCycle bool
+
+	// pass-through stall/recovery state.
+	passthroughStallCycles            int
+	passthroughStallActive            bool
+	passthroughRecoveryActive         bool
+	passthroughRecoveryStartedAt      time.Time
+	lastPassthroughRecoveryAt         time.Time
+	surplusFeedInDisabledByController bool
+	loggedPassthroughRecoveryBlocked  bool
 }
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil
