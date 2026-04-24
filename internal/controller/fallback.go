@@ -15,6 +15,9 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 		c.m.FallbackTotal.WithLabelValues(reason).Inc()
 		c.m.SetState(metrics.StateFallback)
 	}
+	if c.resetNearFullIdleState("fallback") {
+		slog.Info("near-full idle deactivated", "reason", "fallback")
+	}
 
 	if c.lastCommandWatts == 0 {
 		return nil
@@ -61,14 +64,16 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	return nil
 }
 
-// commandZero disables the controlled slot and sets state to idle. It is used
-// when the SoC soft floor is active to avoid publishing commands that the BMS
-// will silently gate. Unlike fallback(), it increments CommandSuppressedTotal
-// rather than FallbackTotal, and it always preserves the other four slots from
-// the freshly-read devStatus (not the cached lastStatus).
-func (c *Controller) commandZero(ctx context.Context, now time.Time, devStatus marstek.Status) error {
+// commandIdle disables the controlled slot and sets state to idle. It is used
+// in deliberately-idle regimes (SoC soft floor below, near-full idle near the
+// top) where commanding anything would either fight the BMS or force a
+// pointless discharge. Unlike fallback(), it increments CommandSuppressedTotal
+// with the caller-supplied reason rather than FallbackTotal, and always
+// preserves the other four slots from the freshly-read devStatus (not the
+// cached lastStatus).
+func (c *Controller) commandIdle(ctx context.Context, now time.Time, devStatus marstek.Status, reason string) error {
 	if c.m != nil {
-		c.m.CommandSuppressedTotal.WithLabelValues("soc_floor").Inc()
+		c.m.CommandSuppressedTotal.WithLabelValues(reason).Inc()
 		c.m.SetState(metrics.StateIdle)
 	}
 
@@ -87,15 +92,16 @@ func (c *Controller) commandZero(ctx context.Context, now time.Time, devStatus m
 
 	payload := marstek.BuildTimedDischargePayload(slots, false)
 	if err := c.pub.Publish(c.cfg.ControlTopic, payload); err != nil {
-		slog.Warn("commandZero publish failed", "err", err)
+		slog.Warn("commandIdle publish failed", "err", err, "reason", reason)
 		if c.m != nil {
 			c.m.MQTTPublishErrorsTotal.WithLabelValues(classifyMQTTError(err)).Inc()
 		}
 		return err
 	}
 
-	slog.Info("soc floor: disabled discharge slot",
+	slog.Info("idle: disabled discharge slot",
 		"slot", c.cfg.ScheduleSlot,
+		"reason", reason,
 		"prev_watts", c.lastCommandWatts)
 	c.lastCommandWatts = 0
 	c.lastCommandTime = now

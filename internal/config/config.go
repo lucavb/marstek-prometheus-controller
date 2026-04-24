@@ -67,14 +67,16 @@ type Config struct {
 	BatterySoCHysteresisPercent    int // resume SoC = soft floor + this; default 5
 	BatterySoCFloorFallbackPercent int // used when DoDPercent is 0/unknown; default 15
 
-	// Full-battery override / top-band passthrough — keeps the commanded
-	// ceiling permissive when the battery is effectively full and solar is
-	// producing, preventing the firmware from inhibiting MPPT due to a too-low
-	// AC output cap while avoiding tight control on noisy top-end SoC samples.
-	FullBatteryOverrideEnabled         bool
-	FullBatterySoCEnterPercent         int // activate when SoC >= this for N consecutive samples
-	FullBatterySoCExitPercent          int // deactivate after sustained SoC samples at/below this threshold
-	FullBatteryEnterConsecutiveSamples int // N consecutive samples used for entry (and exit debouncing)
+	// Near-full idle — disables the controlled slot near the top of charge so
+	// the controller does not fight the BMS or force discharge to make room
+	// for solar. Excess PV is carried through by the device's firmware
+	// surplus-feed-in path (tc_dis=0 in the Marstek app), which is a
+	// precondition for engaging the regime: if surplus feed-in is off,
+	// idling would strand PV at full SoC, so normal control runs instead.
+	NearFullIdleEnabled            bool
+	NearFullIdleEnterPercent       int // SoC >= this for N cycles enters idle
+	NearFullIdleExitPercent        int // SoC < this for N cycles exits idle (must be < NearFullIdleEnterPercent)
+	NearFullIdleConsecutiveSamples int // N consecutive samples for debounced entry and exit
 
 	// Scheduled device restart — opt-in workaround for a device that hangs
 	// periodically. Empty schedule disables the feature entirely.
@@ -129,10 +131,10 @@ func Load() (Config, error) {
 		BatterySoCHysteresisPercent:    getEnvInt("BATTERY_SOC_HYSTERESIS_PERCENT", 5),
 		BatterySoCFloorFallbackPercent: getEnvInt("BATTERY_SOC_FLOOR_FALLBACK_PERCENT", 15),
 
-		FullBatteryOverrideEnabled:         getEnvBool("FULL_BATTERY_OVERRIDE_ENABLED", true),
-		FullBatterySoCEnterPercent:         getEnvInt("FULL_BATTERY_SOC_ENTER_PERCENT", 100),
-		FullBatterySoCExitPercent:          getEnvInt("FULL_BATTERY_SOC_EXIT_PERCENT", 98),
-		FullBatteryEnterConsecutiveSamples: getEnvInt("FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES", 2),
+		NearFullIdleEnabled:            getEnvBool("NEAR_FULL_IDLE_ENABLED", true),
+		NearFullIdleEnterPercent:       getEnvInt("NEAR_FULL_IDLE_ENTER_PERCENT", 98),
+		NearFullIdleExitPercent:        getEnvInt("NEAR_FULL_IDLE_EXIT_PERCENT", 95),
+		NearFullIdleConsecutiveSamples: getEnvInt("NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES", 2),
 
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
 	}
@@ -219,17 +221,17 @@ func (c *Config) validate() error {
 	if c.BatterySoCFloorFallbackPercent < 5 || c.BatterySoCFloorFallbackPercent > 50 {
 		errs = append(errs, "BATTERY_SOC_FLOOR_FALLBACK_PERCENT must be 5–50")
 	}
-	if c.FullBatterySoCEnterPercent < 1 || c.FullBatterySoCEnterPercent > 100 {
-		errs = append(errs, "FULL_BATTERY_SOC_ENTER_PERCENT must be 1–100")
+	if c.NearFullIdleEnterPercent < 1 || c.NearFullIdleEnterPercent > 100 {
+		errs = append(errs, "NEAR_FULL_IDLE_ENTER_PERCENT must be 1–100")
 	}
-	if c.FullBatterySoCExitPercent < 0 || c.FullBatterySoCExitPercent > 99 {
-		errs = append(errs, "FULL_BATTERY_SOC_EXIT_PERCENT must be 0–99")
+	if c.NearFullIdleExitPercent < 0 || c.NearFullIdleExitPercent > 99 {
+		errs = append(errs, "NEAR_FULL_IDLE_EXIT_PERCENT must be 0–99")
 	}
-	if c.FullBatterySoCExitPercent >= c.FullBatterySoCEnterPercent {
-		errs = append(errs, "FULL_BATTERY_SOC_EXIT_PERCENT must be less than FULL_BATTERY_SOC_ENTER_PERCENT")
+	if c.NearFullIdleExitPercent >= c.NearFullIdleEnterPercent {
+		errs = append(errs, "NEAR_FULL_IDLE_EXIT_PERCENT must be less than NEAR_FULL_IDLE_ENTER_PERCENT")
 	}
-	if c.FullBatteryEnterConsecutiveSamples < 1 {
-		errs = append(errs, "FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES must be >= 1")
+	if c.NearFullIdleConsecutiveSamples < 1 {
+		errs = append(errs, "NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES must be >= 1")
 	}
 
 	if c.DeviceRestartSchedule != "" {

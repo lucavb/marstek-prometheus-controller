@@ -67,51 +67,50 @@ The same fast-path logic applies to `MIN_HOLD_TIME` and the min-delta gate: both
 so small export-driven reductions are never swallowed while the battery is
 giving energy away.
 
-## Full-battery override
+## Near-full idle
 
-In `ct_t=7` mode (externally-controlled setpoint) the device uses the commanded
-slot-power as a **hard ceiling** on its AC output. When the battery is full
-(SoC=100 %) and the house load is below the panels' production, this ceiling
-can be too low to give firmware a legal place to put the excess solar energy —
-so the device disables MPPT entirely. Panels go dark while the battery slowly
-discharges serving the house load; MPPT only re-enables once SoC ticks off 100 %.
+When the battery is near full there is nothing useful for the controller to do:
+any discharge it commands is just dumping stored energy that the panels are
+already replacing. The controller therefore enters an explicit **idle regime**
+in the top SoC band — it disables the controlled discharge slot entirely and
+lets the firmware handle excess PV via its own surplus feed-in path
+(`tc_dis=0`).
 
-The full-battery override therefore behaves as a **top-band passthrough mode**:
-once the battery is effectively full and solar is producing, the controller
-stops trying to finely optimize the grid meter and instead keeps the commanded
-ceiling permissive enough for firmware to route PV to house load and —
-provided surplus feed-in is enabled in the Marstek app (`tc_dis=0`) — export
-the remainder to the grid.
+Near-full idle is **SoC-driven only**. There is no solar threshold, no grid
+sign check, no commanded discharge ceiling. While idle is active the controller
+publishes a schedule with the slot disabled (`a<N>=0`, `v<N>=0`) and otherwise
+gets out of the way:
 
-**Entry:** `FULL_BATTERY_SOC_ENTER_PERCENT` (default 100 %) for
-`FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES` (default 2) consecutive control cycles
-**and** `w1+w2 > 0 W` (sun is up).
+- The battery does **not** discharge in the top band — even if the meter shows
+  grid import.
+- Excess PV is routed to the grid by the device's firmware (provided surplus
+  feed-in is enabled in the app), not by the controller commanding a discharge
+  setpoint.
+- The SoC soft floor still wins: if it's active, near-full idle does not
+  engage. (In practice the two ranges don't overlap, but the precedence is
+  explicit.)
 
-**Stay active:** once entered, the controller tolerates brief `100 ↔ 99`
-top-end SoC flicker and single zero-solar telemetry blips instead of dropping
-the mode immediately.
+**Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `98`) for
+`NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) consecutive control cycles.
 
-**Exit:** after `FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES` consecutive control
-cycles where SoC stays at or below `FULL_BATTERY_SOC_EXIT_PERCENT` (default
-98 %) **or** solar stays at `0 W`. Normal zero-import control then resumes.
+**Exit (debounced):** `SoC < NEAR_FULL_IDLE_EXIT_PERCENT` (default `95`) for
+`NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive control cycles. Normal
+grid-meter-driven control then resumes on the next cycle. The 3-point
+hysteresis band rides through LFP top-end SoC flicker without holding idle long
+after the battery has actually come off full.
 
-**Why the debounce matters:** LFP SoC near full is noisy and path-dependent.
-Using the same consecutive-sample guard for exit avoids the controller fighting
-the battery and collapsing passthrough on a one-cycle blip.
+**Hard dependency on surplus feed-in (`tc_dis=0`):** near-full idle will only
+engage when the device reports `SurplusFeedIn = true`. With surplus feed-in
+disabled, the firmware curtails MPPT at full SoC if there is no export path,
+which would strand PV. To avoid that trap, the controller skips idle and keeps
+running normal grid-meter-driven control whenever surplus feed-in is off, and
+logs a warning on startup so the misconfiguration is visible. If surplus
+feed-in flips off **while** idle is active, idle exits immediately (no
+debounce) and normal control resumes.
 
-**Surplus feed-in requirement:** the "panels-to-grid" outcome requires surplus
-feed-in to be enabled in the Marstek app. The controller logs a warning on first
-status if it detects `tc_dis=1` with the override enabled. If feed-in is off,
-raising the ceiling still prevents the overshoot trap but the device will serve
-house load from solar rather than exporting the difference.
-
-**Panel arrays above 800 W:** the override raises the ceiling to
-`MAX_OUTPUT_WATTS=800` W (device hard limit — cannot be raised higher). Arrays
-that can produce more than 800 W at peak will see a small amount of DC-side
-curtailment near solar noon while the battery is full. This is still a strict
-improvement over the pre-override state where MPPT was fully inhibited.
-
-To disable the override entirely set `FULL_BATTERY_OVERRIDE_ENABLED=false`.
+**Kill switch:** set `NEAR_FULL_IDLE_ENABLED=false` to disable the regime
+entirely. The controller then runs its normal grid-meter-driven control at all
+SoC levels.
 
 ## Prerequisites
 
@@ -167,10 +166,10 @@ All settings are environment variables:
 | `BATTERY_SOC_FLOOR_MARGIN_PERCENT` | `2`               | Added to `(100 − device DoD%)` to derive the controller SoC soft floor. When SoC falls at or below this floor, discharge is suppressed until SoC recovers by `BATTERY_SOC_HYSTERESIS_PERCENT`. |
 | `BATTERY_SOC_HYSTERESIS_PERCENT`   | `5`               | Hysteresis band above the soft floor; discharge only resumes once SoC ≥ `(soft_floor + hysteresis)`. Prevents rapid on/off cycling near the floor. |
 | `BATTERY_SOC_FLOOR_FALLBACK_PERCENT` | `15`            | Absolute SoC floor used when the device status does not report a DoD value (`do=0`). |
-| `FULL_BATTERY_OVERRIDE_ENABLED`    | `true`            | Enable the full-battery override (see [Full-battery override](#full-battery-override)). Set to `false` to disable entirely. |
-| `FULL_BATTERY_SOC_ENTER_PERCENT`   | `100`             | SoC threshold to enter the override. Must be 1–100. |
-| `FULL_BATTERY_SOC_EXIT_PERCENT`    | `98`              | SoC threshold that defines the lower edge of the top-band passthrough window. The override exits after sustained samples at or below this threshold. Must be 0–99 and less than `FULL_BATTERY_SOC_ENTER_PERCENT`. |
-| `FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES` | `2`       | Number of consecutive control cycles required to enter the override at `FULL_BATTERY_SOC_ENTER_PERCENT` (with solar > 0). The same count is also used to debounce exit on sustained low-SoC or zero-solar samples. |
+| `NEAR_FULL_IDLE_ENABLED`           | `true`            | Enable the near-full idle regime (see [Near-full idle](#near-full-idle)). Set to `false` to disable entirely; the controller will run normal grid-meter-driven control at all SoC levels. |
+| `NEAR_FULL_IDLE_ENTER_PERCENT`     | `98`              | SoC threshold to enter idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples at or above it. Must satisfy `0 ≤ EXIT_PERCENT < ENTER_PERCENT ≤ 100`. |
+| `NEAR_FULL_IDLE_EXIT_PERCENT`      | `95`              | SoC threshold to exit idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples strictly below it. The 3-point hysteresis band rides through LFP top-end SoC flicker. |
+| `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` | `2`             | Debounce length (in control cycles) for both idle entry and exit. Must be ≥ 1. Surplus-feed-in flipping off bypasses this debounce and exits immediately. |
 | `DEVICE_RESTART_SCHEDULE`           | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4 * * *` for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart). |
 | `DEVICE_RESTART_TIMEZONE`           | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty. |
 
@@ -281,7 +280,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `battery_soc_soft_floor_percent` | Gauge | Derived SoC soft floor: `(100−DoD)+margin`. Discharge is suppressed below this value. |
 | `battery_temp_min_celsius`   | Gauge | Device-reported minimum cell temperature (°C); observability only |
 | `battery_temp_max_celsius`   | Gauge | Device-reported maximum cell temperature (°C); observability only |
-| `full_battery_override_active` | Gauge | 1 while the controller is in top-band passthrough mode near full charge; 0 otherwise |
+| `near_full_idle_active`      | Gauge | 1 while the controller is in the near-full idle regime (slot disabled); 0 otherwise |
 | `surplus_feed_in_enabled`    | Gauge | 1 when the device has surplus feed-in enabled (`tc_dis=0`); 0 when disabled |
 
 
@@ -311,12 +310,40 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `mqtt_status_messages_total`    | Counter   |          | Total device status messages received                                                     |
 | `self_polls_total`              | Counter   |          | Times the controller self-polled (status was stale)                                       |
 | `control_cycles_total`          | Counter   |          | Total control loop iterations                                                             |
-| `command_suppressed_total`      | Counter   | `reason` | Suppressed commands (deadband, delta, hold_time, disconnected, status_stale, soc_floor, transient_zero_output) |
+| `command_suppressed_total`      | Counter   | `reason` | Suppressed commands (`deadband`, `delta`, `hold_time`, `disconnected`, `status_stale`, `soc_floor`, `transient_zero_output`, `near_full_idle`) |
 | `fallback_total`                | Counter   | `reason` | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error) |
-| `full_battery_override_entered_total` | Counter | | Times the full-battery override has been activated (rising edge) |
-| `full_battery_override_exited_total`  | Counter | | Times the full-battery override has been deactivated (falling edge) |
-| `full_battery_override_exit_reason_total` | Counter | `reason` | Reason-specific exits from top-band passthrough mode (`soc_exit`, `solar_zero_debounced`) |
+| `near_full_idle_entered_total`  | Counter   |          | Times the near-full idle regime has been activated (rising edge) |
+| `near_full_idle_exited_total`   | Counter   |          | Times the near-full idle regime has been deactivated (falling edge) |
+| `near_full_idle_exit_reason_total` | Counter | `reason` | Reason-specific exits from near-full idle (`soc_exit`, `fallback`, `surplus_feed_in_disabled`, `disabled`) |
 | `control_loop_duration_seconds` | Histogram |          | Wall time per control cycle                                                               |
+
+
+### Migration: full-battery override → near-full idle
+
+The previous `full-battery override` / "top-band passthrough" mechanism has
+been removed entirely. It commanded `MAX_OUTPUT_WATTS` in the top SoC band,
+which the firmware interpreted as a discharge setpoint and actively drained
+the battery while PV was still producing. The new [Near-full idle](#near-full-idle)
+regime instead **disables the slot** in the top SoC band and lets the
+firmware's own surplus-feed-in path carry excess PV to the grid.
+
+If you have dashboards or alerts referencing the old surface, replace them as
+follows:
+
+| Removed (no longer exposed)                    | Replacement                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------ |
+| `FULL_BATTERY_OVERRIDE_ENABLED`                | `NEAR_FULL_IDLE_ENABLED`                                     |
+| `FULL_BATTERY_SOC_ENTER_PERCENT`               | `NEAR_FULL_IDLE_ENTER_PERCENT`                               |
+| `FULL_BATTERY_SOC_EXIT_PERCENT`                | `NEAR_FULL_IDLE_EXIT_PERCENT`                                |
+| `FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES`       | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES`                         |
+| `marstek_controller_full_battery_override_active`         | `marstek_controller_near_full_idle_active`        |
+| `marstek_controller_full_battery_override_entered_total`  | `marstek_controller_near_full_idle_entered_total` |
+| `marstek_controller_full_battery_override_exited_total`   | `marstek_controller_near_full_idle_exited_total`  |
+| `marstek_controller_full_battery_override_exit_reason_total` | `marstek_controller_near_full_idle_exit_reason_total` (reasons: `soc_exit`, `fallback`, `surplus_feed_in_disabled`, `disabled`) |
+
+Old environment variables no longer have any effect — they will be ignored on
+startup. Old metrics simply disappear from `/metrics`; recording rules and
+alerts referencing them must be updated to the new names.
 
 
 ### Suggested Alert Rules

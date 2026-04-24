@@ -957,14 +957,14 @@ func TestStep_SoCFloor_AtFloor_DisablesSlot(t *testing.T) {
 		t.Fatal("expected publish in step 1")
 	}
 
-	// Step 2: SoC drops to 22 (== floor) → commandZero must fire.
+	// Step 2: SoC drops to 22 (== floor) → commandIdle must fire.
 	p.set(200, 0)
 	st.setFresh(devStatusWithSoC(22, 80))
 	if err := c.Step(context.Background()); err != nil {
 		t.Fatalf("Step 2 error = %v", err)
 	}
 	if pub.count() <= countAfterStep1 {
-		t.Fatal("expected commandZero publish when SoC hits soft floor")
+		t.Fatal("expected commandIdle publish when SoC hits soft floor")
 	}
 	last := pub.last()
 	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
@@ -1002,7 +1002,7 @@ func TestStep_SoCFloor_Hysteresis_StaysAtZero(t *testing.T) {
 	if err := c.Step(context.Background()); err != nil {
 		t.Fatalf("Step error = %v", err)
 	}
-	// commandZero skips publish if lastCommandWatts==0, so count stays the same.
+	// commandIdle skips publish if lastCommandWatts==0, so count stays the same.
 	if pub.count() != countBefore {
 		t.Errorf("expected no additional publish in hysteresis band, got %d new publishes", pub.count()-countBefore)
 	}
@@ -1176,7 +1176,7 @@ func TestStep_SoCFloor_SetsReady(t *testing.T) {
 // TestStep_DeviceStatusLogged_WhenSoCFloorActive verifies that the one-time
 // "device status received" info log fires on the first step that yields a valid
 // device status, even when the SoC soft floor immediately suppresses discharge
-// and commandZero() returns early.  Before the fix, loggedFirmware was never
+// and commandIdle() returns early.  Before the fix, loggedFirmware was never
 // set when socFloorActive was true, so the message was silently dropped.
 func TestStep_DeviceStatusLogged_WhenSoCFloorActive(t *testing.T) {
 	// Capture slog output for the duration of this test.
@@ -1191,7 +1191,7 @@ func TestStep_DeviceStatusLogged_WhenSoCFloorActive(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 
 	// SoC=13 < soft floor=22 (DoD=80 → (100-80)+2=22): floor is active from
-	// the very first step, so commandZero returns early.
+	// the very first step, so commandIdle returns early.
 	p.set(200, 0)
 	st.setFresh(devStatusWithSoC(13, 80))
 
@@ -1461,11 +1461,14 @@ func TestStep_MinCommandDelta_Asymmetric(t *testing.T) {
 	}
 }
 
-// ── Full-battery override tests ────────────────────────────────────────────
+// ── Near-full idle tests ───────────────────────────────────────────────────
 
-// devStatusFull returns a device status with the given SoC, solar and output
-// watts. The DoD is fixed at 80 so the SoC soft floor = 22 — well below 100.
-func devStatusFull(socPct, solarW1, solarW2, g1, g2 int) marstek.Status {
+// devStatusAtSoC returns a device status with tc_dis=0 (SurplusFeedIn=true),
+// DoD=80 (SoC soft floor = 22 — well below the near-full band), the given SoC
+// and solar/output watts, and a prior schedule where slot 1 is enabled at
+// 247 W. It lets each test exercise the near-full idle branch without
+// accidentally tripping the SoC soft floor.
+func devStatusAtSoC(socPct, solarW1, solarW2, g1, g2 int) marstek.Status {
 	return marstek.ParseStatus(fmt.Sprintf(
 		"p1=1,p2=1,w1=%d,w2=%d,pe=%d,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=80,"+
 			"lv=240,cj=0,kn=2240,g1=%d,g2=%d,b1=0,b2=0,md=0,"+
@@ -1476,289 +1479,378 @@ func devStatusFull(socPct, solarW1, solarW2, g1, g2 int) marstek.Status {
 	))
 }
 
-// fullBatteryCfg returns a default config with full-battery override enabled
-// using default thresholds (enter=100, exit=98, consecutive=2).
-func fullBatteryCfg(ctrl, start, end string) controller.Config {
+// devStatusAtSoCNoFeedIn is the same as devStatusAtSoC but with tc_dis=1
+// (SurplusFeedIn=false) so near-full idle is gated off.
+func devStatusAtSoCNoFeedIn(socPct, solarW1, solarW2, g1, g2 int) marstek.Status {
+	return marstek.ParseStatus(fmt.Sprintf(
+		"p1=1,p2=1,w1=%d,w2=%d,pe=%d,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=80,"+
+			"lv=240,cj=0,kn=2240,g1=%d,g2=%d,b1=0,b2=0,md=0,"+
+			"d1=1,e1=0:0,f1=23:59,h1=247,d2=0,e2=0:0,f2=23:59,h2=80,"+
+			"d3=0,e3=0:0,f3=23:59,h3=80,d4=0,e4=0:0,f4=23:59,h4=80,"+
+			"d5=0,e5=0:0,f5=23:59,h5=80,lmo=2029,lmi=293,lmf=1,uv=107,sm=0,bn=0,ct_t=7,tc_dis=1",
+		solarW1, solarW2, socPct, g1, g2,
+	))
+}
+
+// nearFullIdleCfg returns a default config with near-full idle enabled using
+// the production defaults (enter=98, exit=95, consecutive=2).
+func nearFullIdleCfg(ctrl, start, end string) controller.Config {
 	cfg := defaultCfg(ctrl, start, end)
 	cfg.BatterySoCFloorMarginPercent = 2
 	cfg.BatterySoCHysteresisPercent = 5
 	cfg.BatterySoCFloorFallbackPercent = 15
-	cfg.FullBatteryOverrideEnabled = true
-	cfg.FullBatterySoCEnterPercent = 100
-	cfg.FullBatterySoCExitPercent = 98
-	cfg.FullBatteryEnterConsecutiveSamples = 2
+	cfg.NearFullIdleEnabled = true
+	cfg.NearFullIdleEnterPercent = 98
+	cfg.NearFullIdleExitPercent = 95
+	cfg.NearFullIdleConsecutiveSamples = 2
 	return cfg
 }
 
-// TestStep_FullBatteryOverride_EntersAfterConsecutiveSamples verifies that the
-// override requires exactly N consecutive SoC=100+solar samples before firing.
-func TestStep_FullBatteryOverride_EntersAfterConsecutiveSamples(t *testing.T) {
+// TestStep_NearFullIdle_EntryDebounced verifies that idle requires exactly N
+// consecutive SoC>=enter samples before disabling the slot.
+func TestStep_NearFullIdle_EntryDebounced(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Step 1: SoC=100, solar=100 W — first sample, not yet at consecutive=2.
+	// Step 1: SoC=98, single sample. Must not disable yet — normal control runs.
+	// Grid import = 50, g1+g2=123+123=246 → rawTarget clamped via bias to a
+	// positive value; the key check is that the slot stays enabled.
 	p.set(50, 0)
-	st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last1 := pub.last()
-	// rawTarget without override = 123+123+50-0 = 296, clamped to 800.
-	// Should NOT be MaxOutputWatts=800 yet.
-	if strings.Contains(last1, ",v1=800,") {
-		t.Errorf("override must not activate on first sample; got %q", last1)
+	if strings.Contains(last1, ",a1=0,") {
+		t.Errorf("idle must not activate on first sample; got disabled slot %q", last1)
 	}
 
-	// Step 2: SoC=100, solar=100 W again — second consecutive sample → activates.
+	// Step 2: second consecutive SoC=98 sample → idle engages → slot disabled.
 	p.set(50, 0)
-	st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last2 := pub.last()
-	if !strings.Contains(last2, ",v1=800,") {
-		t.Errorf("override must activate after %d consecutive samples; got %q", cfg.FullBatteryEnterConsecutiveSamples, last2)
+	if !strings.Contains(last2, ",a1=0,") {
+		t.Errorf("idle must activate after %d samples; expected a1=0 got %q", cfg.NearFullIdleConsecutiveSamples, last2)
 	}
-	if !strings.Contains(last2, ",a1=1,") {
-		t.Errorf("slot must be enabled during override; got %q", last2)
+	if !strings.Contains(last2, ",v1=0,") {
+		t.Errorf("idle must command v1=0; got %q", last2)
 	}
 }
 
-// TestStep_FullBatteryOverride_DoesNotEnter_WhenSolarZero verifies the
-// night-time guard: two SoC=100 samples with solar=0 must not activate the override.
-func TestStep_FullBatteryOverride_DoesNotEnter_WhenSolarZero(t *testing.T) {
+// TestStep_NearFullIdle_StayThroughSoCFlicker verifies that with enter=98 and
+// exit=95, a SoC that oscillates between 96 and 99 keeps idle active — the
+// exit debounce never accumulates because SoC stays >= exit.
+func TestStep_NearFullIdle_StayThroughSoCFlicker(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	for i := 0; i < 3; i++ {
-		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 0, 0, 123, 123))
-		_ = c.Step(context.Background())
-	}
-	last := pub.last()
-	if strings.Contains(last, ",v1=800,") {
-		t.Errorf("override must not activate with solar=0; got %q", last)
-	}
-}
-
-// TestStep_FullBatteryOverride_ExitsOnSocDrop verifies that the override
-// deactivates only after sustained SoC samples at/below the exit threshold.
-func TestStep_FullBatteryOverride_ExitsOnSocDrop(t *testing.T) {
-	p := &fakeProm{}
-	pub := &fakePublisher{}
-	st := &fakeStatus{}
-	clk := &fakeClock{now: time.Now()}
-
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
-
-	// Activate: two SoC=100 + solar samples.
+	// Activate: two SoC=98 samples.
 	for i := 0; i < 2; i++ {
 		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
-	if !strings.Contains(pub.last(), ",v1=800,") {
-		t.Fatal("precondition: override must be active before exit test")
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
 	}
 
-	// First SoC=98 sample: top-band mode must stay active through the debounce.
-	p.set(50, 0)
-	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
-	_ = c.Step(context.Background())
-	last := pub.last()
-	if !strings.Contains(last, ",v1=800,") {
-		t.Fatalf("override must stay active on first SoC=98 sample; got %q", last)
-	}
-
-	// Second SoC=98 sample: debounce satisfied → override must deactivate.
-	p.set(50, 0)
-	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
-	_ = c.Step(context.Background())
-	last = pub.last()
-	if strings.Contains(last, ",v1=800,") {
-		t.Errorf("override must deactivate after sustained SoC=98 samples; got %q", last)
-	}
-}
-
-// TestStep_FullBatteryOverride_StaysActive_At99_WithSolar verifies that while
-// active, the override stays on across a brief 100↔99 SoC flicker with solar
-// present instead of re-checking the entry threshold every cycle.
-func TestStep_FullBatteryOverride_StaysActive_At99_WithSolar(t *testing.T) {
-	p := &fakeProm{}
-	pub := &fakePublisher{}
-	st := &fakeStatus{}
-	clk := &fakeClock{now: time.Now()}
-
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
-	cfg.FullBatteryEnterConsecutiveSamples = 3
-	c := controller.New(cfg, p, pub, st, clk, nil)
-
-	// Activate.
-	for i := 0; i < cfg.FullBatteryEnterConsecutiveSamples; i++ {
+	// Flicker 96↔99 for several cycles — all are >= exit=95, so exitSamples
+	// never reaches the debounce threshold and idle stays on.
+	for i, soc := range []int{96, 99, 97, 99, 96} {
+		countBefore := pub.count()
 		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+		st.setFresh(devStatusAtSoC(soc, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
-	}
-	if !strings.Contains(pub.last(), ",v1=800,") {
-		t.Fatal("precondition: override must be active")
-	}
-
-	// SoC=99 > exit=98, solar present → must stay active.
-	p.set(50, 0)
-	st.setFresh(devStatusFull(99, 50, 50, 123, 123))
-	_ = c.Step(context.Background())
-	if !strings.Contains(pub.last(), ",v1=800,") {
-		t.Fatalf("override must remain active at SoC=99 with solar; got %q", pub.last())
-	}
-
-	// A return to 100 on the next sample must still behave as already-active
-	// passthrough mode. If the prior 99 sample had incorrectly deactivated the
-	// mode, this step would not have enough fresh consecutive samples to
-	// re-enter because enterSamples=3.
-	p.set(50, 0)
-	st.setFresh(devStatusFull(100, 50, 50, 123, 123))
-	_ = c.Step(context.Background())
-	if !strings.Contains(pub.last(), ",v1=800,") {
-		t.Errorf("override must survive 100↔99 flicker without dropping out; got %q", pub.last())
+		// lastCommandWatts is already 0, so commandIdle short-circuits without
+		// publishing again. The invariant: no publish should show an enabled
+		// slot during the flicker.
+		if pub.count() > countBefore {
+			last := pub.last()
+			if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+				t.Errorf("flicker step %d (soc=%d): idle must keep slot disabled; got %q", i, soc, last)
+			}
+		}
 	}
 }
 
-// TestStep_FullBatteryOverride_ExitsOnSolarLoss verifies that the override
-// deactivates only after sustained solar loss while SoC is still at 100.
-func TestStep_FullBatteryOverride_ExitsOnSolarLoss(t *testing.T) {
+// TestStep_NearFullIdle_ExitDebounced verifies that idle exits only after N
+// consecutive SoC<exit samples, and that the next cycle resumes normal control.
+func TestStep_NearFullIdle_ExitDebounced(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	// Activate.
 	for i := 0; i < 2; i++ {
 		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
-	if !strings.Contains(pub.last(), ",v1=800,") {
-		t.Fatal("precondition: override must be active")
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
 	}
 
-	// First zero-solar sample: top-band mode must stay active through the debounce.
+	// First SoC=94 (< exit=95) sample: idle must stay active.
 	p.set(50, 0)
-	st.setFresh(devStatusFull(100, 0, 0, 123, 123))
+	st.setFresh(devStatusAtSoC(94, 50, 50, 123, 123))
+	countBefore := pub.count()
+	_ = c.Step(context.Background())
+	if pub.count() > countBefore {
+		last := pub.last()
+		if !strings.Contains(last, ",a1=0,") {
+			t.Fatalf("first SoC=94 sample must not re-enable slot; got %q", last)
+		}
+	}
+
+	// Second SoC=94 sample: debounce satisfied → idle exits and normal control
+	// resumes. Grid=50 + g1+g2=246 - bias(0) = 296 W → expect enabled slot.
+	p.set(50, 0)
+	st.setFresh(devStatusAtSoC(94, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last := pub.last()
-	if !strings.Contains(last, ",v1=800,") {
-		t.Fatalf("override must stay active on first solar=0 sample; got %q", last)
+	if !strings.Contains(last, ",a1=1,") {
+		t.Errorf("after exit debounce, normal control must re-enable slot; got %q", last)
 	}
-
-	// Second zero-solar sample: debounce satisfied → override must exit.
-	p.set(50, 0)
-	st.setFresh(devStatusFull(100, 0, 0, 123, 123))
-	_ = c.Step(context.Background())
-	last = pub.last()
-	if strings.Contains(last, ",v1=800,") {
-		t.Errorf("override must deactivate after sustained solar=0; got %q", last)
+	if strings.Contains(last, ",v1=0,") {
+		t.Errorf("after exit, slot power must be non-zero; got %q", last)
 	}
 }
 
-// TestStep_FullBatteryOverride_Disabled_NoOp verifies that setting
-// FullBatteryOverrideEnabled=false prevents activation entirely.
-func TestStep_FullBatteryOverride_Disabled_NoOp(t *testing.T) {
+// TestStep_NearFullIdle_DoesNotDischargeOnGridImport verifies the core
+// invariant: once idle is active, a grid import does not cause discharge —
+// the slot stays disabled regardless of load.
+func TestStep_NearFullIdle_DoesNotDischargeOnGridImport(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
-	cfg.FullBatteryOverrideEnabled = false
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	for i := 0; i < 3; i++ {
+	// Activate idle.
+	for i := 0; i < 2; i++ {
 		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+		st.setFresh(devStatusAtSoC(98, 50, 50, 0, 0))
 		_ = c.Step(context.Background())
 	}
-	last := pub.last()
-	if strings.Contains(last, ",v1=800,") {
-		t.Errorf("override must not activate when disabled; got %q", last)
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
+	}
+
+	// 300 W grid import, SoC=99 (still in idle band), battery currently not
+	// outputting. Controller must NOT ramp up discharge — slot stays disabled.
+	p.set(300, 0)
+	st.setFresh(devStatusAtSoC(99, 50, 50, 0, 0))
+	countBefore := pub.count()
+	_ = c.Step(context.Background())
+	if pub.count() > countBefore {
+		last := pub.last()
+		if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+			t.Errorf("import at SoC=99 in idle must not publish discharge; got %q", last)
+		}
 	}
 }
 
-// TestStep_FullBatteryOverride_GatedBySoCFloor verifies that the SoC soft floor
-// takes precedence over the full-battery override. When SoC is below the floor,
-// commandZero fires before the override evaluation.
-func TestStep_FullBatteryOverride_GatedBySoCFloor(t *testing.T) {
+// TestStep_NearFullIdle_SoCFloorTakesPrecedence verifies that the SoC soft
+// floor still wins over near-full idle. (Both disable the slot, but the
+// precedence matters so the soc_floor metric is incremented, not
+// near_full_idle.)
+func TestStep_NearFullIdle_SoCFloorTakesPrecedence(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Step 1: normal discharge to establish lastCommandWatts.
+	// Step 1: establish a non-zero lastCommandWatts.
 	p.set(200, 0)
-	st.setFresh(devStatusWithSoC(51, 80))
+	st.setFresh(devStatusAtSoC(51, 0, 0, 80, 80))
 	_ = c.Step(context.Background())
 
-	// Step 2: SoC drops below floor (22); SoC floor must win.
+	// Step 2: SoC=13 < soft floor=22 AND SoC=13 would never enter near-full
+	// idle anyway, but the important check is that SoC floor fires first.
+	// To probe precedence, use a SoC that would satisfy both branches if the
+	// floor didn't win — that's not possible (enter=98 is always above the
+	// floor), so we instead verify the floor path still disables the slot
+	// even with near-full idle enabled.
 	p.set(200, 0)
 	st.setFresh(devStatusWithSoC(13, 80))
 	_ = c.Step(context.Background())
 	last := pub.last()
 	if !strings.Contains(last, ",a1=0,") {
-		t.Errorf("SoC floor must take precedence, expected a1=0; got %q", last)
+		t.Errorf("SoC floor must disable slot; got %q", last)
 	}
-	if strings.Contains(last, ",v1=800,") {
-		t.Errorf("full-battery override must not fire when SoC floor is active; got %q", last)
+	if !strings.Contains(last, ",v1=0,") {
+		t.Errorf("SoC floor must command v1=0; got %q", last)
 	}
 }
 
-// TestStep_FullBatteryOverride_ReEntersAfterExit verifies that after the
-// override exits (SoC stays at 98 long enough to satisfy the debounce), it can re-enter when SoC climbs back
-// to 100 with solar, accumulating fresh consecutive samples.
-func TestStep_FullBatteryOverride_ReEntersAfterExit(t *testing.T) {
+// TestStep_NearFullIdle_FallbackClearsState verifies that when fallback fires
+// while idle is active, state is fully reset and a subsequent fresh SoC>=enter
+// sample does not instantly re-engage — the enter debounce must restart.
+func TestStep_NearFullIdle_FallbackClearsState(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate, then exit after two consecutive SoC=98 samples.
+	// Activate idle.
 	for i := 0; i < 2; i++ {
 		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
-	p.set(50, 0)
-	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
-	_ = c.Step(context.Background())
-	p.set(50, 0)
-	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
-	_ = c.Step(context.Background())
-	if strings.Contains(pub.last(), ",v1=800,") {
-		t.Fatal("precondition: override must have exited after sustained SoC=98")
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
 	}
 
-	// Re-enter: two fresh consecutive SoC=100+solar samples.
-	for i := 0; i < 2; i++ {
+	// Fallback: Prometheus error clears the idle state. lastCommandWatts is
+	// already 0 so fallback short-circuits without publishing, which is fine —
+	// the state reset is what we're testing.
+	p.setErr(errors.New("boom"))
+	_ = c.Step(context.Background())
+
+	// Recovery sample 1: fresh post-fallback — debounce must not be carried
+	// over, so idle must NOT instantly re-engage.
+	p.set(50, 0)
+	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
+	countBefore := pub.count()
+	_ = c.Step(context.Background())
+	if pub.count() > countBefore {
+		last := pub.last()
+		if strings.Contains(last, ",a1=0,") && strings.Contains(last, ",v1=0,") {
+			// Only a1=0 v1=0 on the first post-fallback sample would mean idle
+			// re-engaged without debounce — that's the regression.
+			t.Fatalf("idle must not re-engage on first sample after fallback; got %q", last)
+		}
+	}
+
+	// Recovery sample 2: debounce complete → idle engages again.
+	p.set(50, 0)
+	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
+	_ = c.Step(context.Background())
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Errorf("idle must re-engage after a fresh post-fallback streak; got %q", pub.last())
+	}
+}
+
+// TestStep_NearFullIdle_KillSwitchDisables verifies that the env kill switch
+// prevents activation entirely even at SoC=100 with surplus feed-in enabled.
+func TestStep_NearFullIdle_KillSwitchDisables(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.NearFullIdleEnabled = false
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < 3; i++ {
 		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+		st.setFresh(devStatusAtSoC(100, 50, 50, 0, 0))
 		_ = c.Step(context.Background())
 	}
-	if !strings.Contains(pub.last(), ",v1=800,") {
-		t.Errorf("override must re-enter after SoC climbs back to 100; got %q", pub.last())
+	last := pub.last()
+	if strings.Contains(last, ",a1=0,") && strings.Contains(last, ",v1=0,") {
+		t.Errorf("idle must not activate when kill switch is off; got %q", last)
+	}
+}
+
+// TestStep_NearFullIdle_RequiresSurplusFeedIn verifies that idle does not
+// engage while SurplusFeedIn is reported false, and engages cleanly (after
+// the debounce) once the device reports it as true.
+func TestStep_NearFullIdle_RequiresSurplusFeedIn(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Several SoC=100 samples with tc_dis=1 (SurplusFeedIn=false) — must NOT
+	// engage idle; normal control runs.
+	for i := 0; i < 3; i++ {
+		p.set(50, 0)
+		st.setFresh(devStatusAtSoCNoFeedIn(100, 50, 50, 80, 80))
+		_ = c.Step(context.Background())
+	}
+	last := pub.last()
+	if strings.Contains(last, ",a1=0,") && strings.Contains(last, ",v1=0,") {
+		t.Errorf("idle must not engage while SurplusFeedIn=false; got %q", last)
+	}
+
+	// Flip SurplusFeedIn to true: debounce still applies, so the first sample
+	// must not activate on its own.
+	p.set(50, 0)
+	st.setFresh(devStatusAtSoC(100, 50, 50, 80, 80))
+	_ = c.Step(context.Background())
+	if strings.Contains(pub.last(), ",a1=0,") && strings.Contains(pub.last(), ",v1=0,") {
+		// Could be valid if this is the second sample — but we only just flipped
+		// the flag, so this is the first sample under gating. Guard against a
+		// regression where the entry counter persists across gating transitions.
+		t.Fatalf("idle must not engage on first SurplusFeedIn=true sample; got %q", pub.last())
+	}
+
+	// Second sample after flip → idle engages.
+	p.set(50, 0)
+	st.setFresh(devStatusAtSoC(100, 50, 50, 80, 80))
+	_ = c.Step(context.Background())
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Errorf("idle must engage after debounce once SurplusFeedIn=true; got %q", pub.last())
+	}
+}
+
+// TestStep_NearFullIdle_SurplusFeedInFlipExitsIdle verifies that flipping
+// SurplusFeedIn to false while idle is active immediately exits idle so the
+// firmware doesn't curtail MPPT at full SoC with no export path.
+func TestStep_NearFullIdle_SurplusFeedInFlipExitsIdle(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Activate idle with SurplusFeedIn=true.
+	for i := 0; i < 2; i++ {
+		p.set(50, 0)
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
+	}
+
+	// Flip SurplusFeedIn to false: idle must exit immediately (no debounce) and
+	// normal control runs. Grid=50 + g1+g2=246 - bias(0) = 296 W → slot enabled.
+	p.set(50, 0)
+	st.setFresh(devStatusAtSoCNoFeedIn(98, 50, 50, 123, 123))
+	_ = c.Step(context.Background())
+	last := pub.last()
+	if !strings.Contains(last, ",a1=1,") {
+		t.Errorf("idle must exit and re-enable slot when SurplusFeedIn flips off; got %q", last)
 	}
 }
 
@@ -1788,7 +1880,6 @@ func TestStep_TransientZeroOutput_HoldsOneCycle(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	cfg.FullBatteryOverrideEnabled = false // isolate guard behaviour
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	// Step 1: establish 200 W discharge (g1=100, g2=100).
@@ -1828,7 +1919,6 @@ func TestStep_TransientZeroOutput_DoesNotHold_TwoInARow(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	cfg.FullBatteryOverrideEnabled = false
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	// Step 1: establish discharge.
@@ -1865,7 +1955,6 @@ func TestStep_TransientZeroOutput_DoesNotFire_WhenCommandIsMin(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	cfg.FullBatteryOverrideEnabled = false
 	cfg.ImportBiasWatts = 120 // bias high so rawTarget snaps to 80 W on first step
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
@@ -1888,52 +1977,9 @@ func TestStep_TransientZeroOutput_DoesNotFire_WhenCommandIsMin(t *testing.T) {
 	_ = countAfter1
 }
 
-// TestStep_TransientZeroOutput_DoesNotFire_WhenFullBatteryOverrideActive
-// verifies that when the full-battery override is already active (rawTarget
-// will be MaxOutputWatts regardless), the guard's suppression does not
-// interfere — the override dominates.
-func TestStep_TransientZeroOutput_DoesNotFire_WhenFullBatteryOverrideActive(t *testing.T) {
-	p := &fakeProm{}
-	pub := &fakePublisher{}
-	st := &fakeStatus{}
-	clk := &fakeClock{now: time.Now()}
-
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
-
-	// Activate override: two SoC=100+solar samples with non-zero output.
-	for i := 0; i < 2; i++ {
-		p.set(50, 0)
-		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
-		_ = c.Step(context.Background())
-	}
-	if !strings.Contains(pub.last(), ",v1=800,") {
-		t.Fatal("precondition: override must be active")
-	}
-
-	// Now send g1=g2=0 while override is active. The guard must not suppress
-	// (transient-zero fires only when lastCommand > MinOutputWatts AND not in
-	// override). Even if guard fires, override will set rawTarget=800 in the
-	// same cycle, but the plan specifies guard should not interfere.
-	// We verify that 800 W is still commanded (or suppressed by delta gate,
-	// which means the prior 800 W command stands).
-	p.set(50, 0)
-	st.setFresh(devStatusFull(100, 50, 50, 0, 0))
-	countBefore := pub.count()
-	_ = c.Step(context.Background())
-	// Either delta suppresses (no new publish) or publishes 800 W — both fine.
-	// The critical invariant: if a publish happened, it must be 800 W.
-	if pub.count() > countBefore {
-		last := pub.last()
-		if !strings.Contains(last, ",v1=800,") {
-			t.Errorf("during override, any publish must be 800 W; got %q", last)
-		}
-	}
-}
-
-// TestStep_SurplusFeedIn_WarnWhenDisabledAndOverrideEnabled verifies that the
-// one-time startup log warns when override is enabled but tc_dis=1.
-func TestStep_SurplusFeedIn_WarnWhenDisabledAndOverrideEnabled(t *testing.T) {
+// TestStep_SurplusFeedIn_WarnsWhenDisabledAndNearFullIdleEnabled verifies that
+// the one-time startup log warns when near-full idle is enabled but tc_dis=1.
+func TestStep_SurplusFeedIn_WarnsWhenDisabledAndNearFullIdleEnabled(t *testing.T) {
 	var buf strings.Builder
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -1955,15 +2001,14 @@ func TestStep_SurplusFeedIn_WarnWhenDisabledAndOverrideEnabled(t *testing.T) {
 	st.setFresh(statusNoFeedIn)
 	p.set(200, 0)
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 	_ = c.Step(context.Background())
 
 	output := buf.String()
 	if !strings.Contains(output, "surplus feed-in is disabled") {
-		t.Errorf("expected surplus feed-in disabled warning when override enabled and tc_dis=1\nlog output:\n%s", output)
+		t.Errorf("expected surplus feed-in disabled warning when near-full idle enabled and tc_dis=1\nlog output:\n%s", output)
 	}
-	// Must NOT contain the old inverted warning about feed-in "interfering".
 	if strings.Contains(output, "may interfere with zero-export control") {
 		t.Errorf("old 'may interfere' warning must not appear; got:\n%s", output)
 	}
@@ -1982,11 +2027,11 @@ func TestStep_SurplusFeedIn_NoWarnWhenEnabled(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 
-	// tc_dis=0 → SurplusFeedIn=true.
-	st.setFresh(devStatusFull(51, 100, 100, 100, 100))
+	// tc_dis=0 → SurplusFeedIn=true. SoC=51 keeps idle disengaged.
+	st.setFresh(devStatusAtSoC(51, 0, 0, 100, 100))
 	p.set(200, 0)
 
-	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 	_ = c.Step(context.Background())
 
