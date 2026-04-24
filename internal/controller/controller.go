@@ -65,9 +65,10 @@ type Config struct {
 	BatterySoCHysteresisPercent    int
 	BatterySoCFloorFallbackPercent int
 
-	// Full-battery override — raises the commanded ceiling to MaxOutputWatts
-	// when the battery is full and solar is producing so that firmware keeps
-	// MPPT active rather than inhibiting it due to a too-low AC output cap.
+	// Full-battery override / top-band passthrough mode — keeps the commanded
+	// ceiling permissive when the battery is effectively full and solar is
+	// producing so firmware can continue routing PV to AC / grid rather than
+	// inhibiting MPPT due to a too-low AC output cap.
 	FullBatteryOverrideEnabled         bool
 	FullBatterySoCEnterPercent         int
 	FullBatterySoCExitPercent          int
@@ -102,15 +103,24 @@ type Controller struct {
 	// It stays true until SoC climbs back above (softFloor + hysteresis).
 	socFloorActive bool
 
-	// fullBatteryOverrideActive is true while the battery is full, solar is
-	// producing, and the full-battery override is enabled. While active the
-	// commanded ceiling is raised to MaxOutputWatts so firmware keeps MPPT on.
+	// fullBatteryOverrideActive is true while the controller is in the
+	// top-band passthrough regime. While active the commanded ceiling is kept
+	// permissive so firmware can continue routing PV without the controller
+	// fighting top-of-charge behavior.
 	fullBatteryOverrideActive bool
 	// fullBatterySoCHighSamples counts consecutive cycles where SoC >= enter
-	// threshold. The override only activates after this reaches
-	// FullBatteryEnterConsecutiveSamples to avoid false trips on a rapid SoC
-	// jump near the top.
+	// threshold and solar is producing. The mode only activates after this
+	// reaches FullBatteryEnterConsecutiveSamples to avoid false trips on a
+	// rapid SoC jump near the top.
 	fullBatterySoCHighSamples int
+	// fullBatteryLowSoCSamples counts consecutive active-mode cycles where SoC
+	// is at/below the configured exit threshold. A debounce avoids fighting
+	// LFP top-end SoC flicker.
+	fullBatteryLowSoCSamples int
+	// fullBatterySolarZeroSamples counts consecutive active-mode cycles where
+	// solar is absent. This prevents a single zero-solar telemetry blip from
+	// dropping passthrough mode immediately.
+	fullBatterySolarZeroSamples int
 
 	// transientZeroFiredLastCycle prevents the transient-zero-output guard from
 	// holding for more than one consecutive cycle.

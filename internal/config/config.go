@@ -67,13 +67,14 @@ type Config struct {
 	BatterySoCHysteresisPercent    int // resume SoC = soft floor + this; default 5
 	BatterySoCFloorFallbackPercent int // used when DoDPercent is 0/unknown; default 15
 
-	// Full-battery override — raises the commanded ceiling to MaxOutputWatts
-	// when the battery is full and solar is producing, preventing the firmware
-	// from inhibiting MPPT due to a too-low AC output cap.
+	// Full-battery override / top-band passthrough — keeps the commanded
+	// ceiling permissive when the battery is effectively full and solar is
+	// producing, preventing the firmware from inhibiting MPPT due to a too-low
+	// AC output cap while avoiding tight control on noisy top-end SoC samples.
 	FullBatteryOverrideEnabled         bool
 	FullBatterySoCEnterPercent         int // activate when SoC >= this for N consecutive samples
-	FullBatterySoCExitPercent          int // deactivate when SoC drops to/below this
-	FullBatteryEnterConsecutiveSamples int // N consecutive high-SoC samples required to enter
+	FullBatterySoCExitPercent          int // deactivate after sustained SoC samples at/below this threshold
+	FullBatteryEnterConsecutiveSamples int // N consecutive samples used for entry (and exit debouncing)
 
 	// Scheduled device restart — opt-in workaround for a device that hangs
 	// periodically. Empty schedule disables the feature entirely.

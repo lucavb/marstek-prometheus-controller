@@ -189,10 +189,13 @@ func (c *Controller) Step(ctx context.Context) error {
 	// recovery). Recomputing rawTarget from zero output causes a snap to
 	// MinOutputWatts=80 which can then trigger MPPT inhibit at SoC=100.
 	// Hold the previous command for exactly one cycle; if the next cycle is
-	// still zero we proceed normally so we can never get stuck.
+	// still zero we proceed normally so we can never get stuck. Skip this guard
+	// while top-band passthrough mode is already active — preserving the
+	// permissive ceiling matters more than reacting to a transient output blip.
 	currentZeroOutput := devStatus.Output1Watts == 0 && devStatus.Output2Watts == 0
 	prevHadOutput := hasPrevStatus && (prevStatus.Output1Watts+prevStatus.Output2Watts) > 0
-	if currentZeroOutput && prevHadOutput && c.lastCommandWatts > c.cfg.MinOutputWatts && !c.transientZeroFiredLastCycle {
+	if currentZeroOutput && prevHadOutput && c.lastCommandWatts > c.cfg.MinOutputWatts &&
+		!c.transientZeroFiredLastCycle && !c.fullBatteryOverrideActive {
 		c.transientZeroFiredLastCycle = true
 		if c.m != nil {
 			c.m.CommandSuppressedTotal.WithLabelValues("transient_zero_output").Inc()
@@ -232,50 +235,93 @@ func (c *Controller) Step(ctx context.Context) error {
 		rawTarget = c.cfg.MinOutputWatts
 	}
 
-	// ── 4b. Full-battery override ─────────────────────────────────────────────
+	// ── 4b. Full-battery override / top-band passthrough ─────────────────────
 	// When the battery is full and solar is producing, the firmware uses the
 	// commanded slot-power as a hard AC output ceiling. If that ceiling is ≤
 	// house load, firmware has nowhere to put excess solar and inhibits MPPT.
-	// The fix: raise the ceiling to MaxOutputWatts so firmware can always route
-	// panels-to-AC and, when SurplusFeedIn is enabled, panels-to-grid.
+	// The fix: enter a top-band passthrough regime that keeps the ceiling
+	// permissive enough for firmware to route panels-to-AC and, when
+	// SurplusFeedIn is enabled, panels-to-grid. Entry remains strict; staying in
+	// the regime is intentionally debounced so the controller does not fight
+	// brief 100↔99 SoC flicker or one-cycle solar dropouts near full.
 	solarWatts := devStatus.Solar1Watts + devStatus.Solar2Watts
+	fullBatteryOverrideBypass := false
 	if c.cfg.FullBatteryOverrideEnabled {
-		atEnterThreshold := devStatus.SOCPercent >= c.cfg.FullBatterySoCEnterPercent
-		if atEnterThreshold && solarWatts > 0 {
-			c.fullBatterySoCHighSamples++
-		} else {
-			c.fullBatterySoCHighSamples = 0
+		requiredSamples := c.cfg.FullBatteryEnterConsecutiveSamples
+		if requiredSamples < 1 {
+			requiredSamples = 1
 		}
 
-		shouldBeActive := c.fullBatterySoCHighSamples >= c.cfg.FullBatteryEnterConsecutiveSamples &&
-			devStatus.SOCPercent > c.cfg.FullBatterySoCExitPercent &&
-			solarWatts > 0
+		atEnterThreshold := devStatus.SOCPercent >= c.cfg.FullBatterySoCEnterPercent && solarWatts > 0
+		if !c.fullBatteryOverrideActive {
+			if atEnterThreshold {
+				c.fullBatterySoCHighSamples++
+			} else {
+				c.fullBatterySoCHighSamples = 0
+			}
 
-		if shouldBeActive && !c.fullBatteryOverrideActive {
-			c.fullBatteryOverrideActive = true
-			if c.m != nil {
-				c.m.FullBatteryOverrideEntered.Inc()
+			if c.fullBatterySoCHighSamples >= requiredSamples {
+				c.fullBatteryOverrideActive = true
+				c.fullBatterySoCHighSamples = 0
+				c.fullBatteryLowSoCSamples = 0
+				c.fullBatterySolarZeroSamples = 0
+				fullBatteryOverrideBypass = true
+				if c.m != nil {
+					c.m.FullBatteryOverrideEntered.Inc()
+				}
+				if !devStatus.SurplusFeedIn {
+					slog.Warn("full-battery override active but surplus feed-in is disabled in the app (tc_dis=1); panels-to-grid will not work until re-enabled")
+				}
+				slog.Info("full-battery override activated",
+					"soc_pct", devStatus.SOCPercent,
+					"solar_watts", solarWatts,
+					"surplus_feed_in", devStatus.SurplusFeedIn,
+					"mode", "top_band_passthrough")
 			}
-			if !devStatus.SurplusFeedIn && c.m != nil {
-				slog.Warn("full-battery override active but surplus feed-in is disabled in the app (tc_dis=1); panels-to-grid will not work until re-enabled")
+		} else {
+			// Once active, stay in passthrough mode until we see sustained evidence
+			// that top-of-charge conditions are genuinely over.
+			c.fullBatterySoCHighSamples = 0
+			if devStatus.SOCPercent <= c.cfg.FullBatterySoCExitPercent {
+				c.fullBatteryLowSoCSamples++
+			} else {
+				c.fullBatteryLowSoCSamples = 0
 			}
-			slog.Info("full-battery override activated",
-				"soc_pct", devStatus.SOCPercent,
-				"solar_watts", solarWatts,
-				"surplus_feed_in", devStatus.SurplusFeedIn)
-		} else if !shouldBeActive && c.fullBatteryOverrideActive {
-			c.fullBatteryOverrideActive = false
-			if c.m != nil {
-				c.m.FullBatteryOverrideExited.Inc()
+			if solarWatts == 0 {
+				c.fullBatterySolarZeroSamples++
+			} else {
+				c.fullBatterySolarZeroSamples = 0
 			}
-			slog.Info("full-battery override deactivated",
-				"soc_pct", devStatus.SOCPercent,
-				"solar_watts", solarWatts)
+
+			exitReason := ""
+			switch {
+			case c.fullBatteryLowSoCSamples >= requiredSamples:
+				exitReason = "soc_exit"
+			case c.fullBatterySolarZeroSamples >= requiredSamples:
+				exitReason = "solar_zero_debounced"
+			}
+
+			if exitReason != "" {
+				c.fullBatteryOverrideActive = false
+				c.fullBatteryLowSoCSamples = 0
+				c.fullBatterySolarZeroSamples = 0
+				if c.m != nil {
+					c.m.FullBatteryOverrideExited.Inc()
+					c.m.FullBatteryOverrideExitReasonTotal.WithLabelValues(exitReason).Inc()
+				}
+				slog.Info("full-battery override deactivated",
+					"soc_pct", devStatus.SOCPercent,
+					"solar_watts", solarWatts,
+					"reason", exitReason,
+					"samples", requiredSamples)
+			}
 		}
 	} else {
 		// Override disabled via config: ensure state is clean.
 		c.fullBatteryOverrideActive = false
 		c.fullBatterySoCHighSamples = 0
+		c.fullBatteryLowSoCSamples = 0
+		c.fullBatterySolarZeroSamples = 0
 	}
 
 	if c.m != nil {
@@ -296,6 +342,13 @@ func (c *Controller) Step(ctx context.Context) error {
 
 	// ── 5. Apply ramp and hold-time suppression ───────────────────────────────
 	ramped := c.applyRamp(c.lastCommandWatts, rawTarget)
+	if c.fullBatteryOverrideActive {
+		// In top-band passthrough mode the command acts as a permissive ceiling,
+		// not a request to force 800 W discharge. Publish that ceiling
+		// immediately so PV can pass through without waiting for ramp-up or
+		// hold-time delays to catch up.
+		ramped = rawTarget
+	}
 	// Export fast-path: if the grid is currently exporting (smoothed < 0) the
 	// ramp-down limit must not slow our response — every watt still discharging
 	// is energy we are giving away and cannot recover.  Jump straight to the
@@ -341,7 +394,7 @@ func (c *Controller) Step(ctx context.Context) error {
 	// and we are reducing the command, skip the hold-time suppression. Every
 	// extra second of discharge during export is energy we cannot recover.
 	holdTimeActive := !c.lastCommandTime.IsZero() && now.Sub(c.lastCommandTime) < c.cfg.MinHoldTime
-	fastPathBypass := exporting && ramped < c.lastCommandWatts
+	fastPathBypass := fullBatteryOverrideBypass || c.fullBatteryOverrideActive || (exporting && ramped < c.lastCommandWatts)
 	if holdTimeActive && !fastPathBypass {
 		if c.m != nil {
 			c.m.CommandSuppressedTotal.WithLabelValues("hold_time").Inc()

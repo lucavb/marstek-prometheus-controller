@@ -60,10 +60,11 @@ type Metrics struct {
 	BatteryTempMinCelsius      prometheus.Gauge // device-reported min cell temp (tl); observability only
 	BatteryTempMaxCelsius      prometheus.Gauge // device-reported max cell temp (th); observability only
 
-	// Full-battery override state
-	FullBatteryOverrideActive  prometheus.Gauge   // 1 while override is active, 0 otherwise
-	FullBatteryOverrideEntered prometheus.Counter // incremented on each rising edge (inactive → active)
-	FullBatteryOverrideExited  prometheus.Counter // incremented on each falling edge (active → inactive)
+	// Full-battery override / top-band passthrough state
+	FullBatteryOverrideActive          prometheus.Gauge       // 1 while top-band passthrough mode is active, 0 otherwise
+	FullBatteryOverrideEntered         prometheus.Counter     // incremented on each rising edge (inactive → active)
+	FullBatteryOverrideExited          prometheus.Counter     // incremented on each falling edge (active → inactive)
+	FullBatteryOverrideExitReasonTotal *prometheus.CounterVec // label: reason
 
 	// Device feed-in flag mirrored from device status (tc_dis)
 	SurplusFeedInEnabled prometheus.Gauge // 1 when tc_dis=0 (feed-in enabled), 0 when tc_dis=1
@@ -182,9 +183,10 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		BatteryTempMinCelsius:      newGauge("battery_temp_min_celsius", "Device-reported minimum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
 		BatteryTempMaxCelsius:      newGauge("battery_temp_max_celsius", "Device-reported maximum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
 
-		FullBatteryOverrideActive:  newGauge("full_battery_override_active", "1 while the full-battery override is active (SoC at ceiling, solar producing); 0 otherwise."),
-		FullBatteryOverrideEntered: newCounter("full_battery_override_entered_total", "Number of times the full-battery override has been activated (rising edge)."),
-		FullBatteryOverrideExited:  newCounter("full_battery_override_exited_total", "Number of times the full-battery override has been deactivated (falling edge)."),
+		FullBatteryOverrideActive:          newGauge("full_battery_override_active", "1 while the controller is in top-band passthrough mode near full charge; 0 otherwise."),
+		FullBatteryOverrideEntered:         newCounter("full_battery_override_entered_total", "Number of times the full-battery passthrough mode has been activated (rising edge)."),
+		FullBatteryOverrideExited:          newCounter("full_battery_override_exited_total", "Number of times the full-battery passthrough mode has been deactivated (falling edge)."),
+		FullBatteryOverrideExitReasonTotal: newCounterVec("full_battery_override_exit_reason_total", "Reason-specific full-battery passthrough exits.", []string{"reason"}),
 
 		SurplusFeedInEnabled: newGauge("surplus_feed_in_enabled", "1 when the device has surplus feed-in enabled (tc_dis=0); 0 when disabled (tc_dis=1). Mirrors the device status flag."),
 

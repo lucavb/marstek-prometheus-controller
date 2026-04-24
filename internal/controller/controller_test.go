@@ -1548,7 +1548,7 @@ func TestStep_FullBatteryOverride_DoesNotEnter_WhenSolarZero(t *testing.T) {
 }
 
 // TestStep_FullBatteryOverride_ExitsOnSocDrop verifies that the override
-// deactivates when SoC drops to the exit threshold.
+// deactivates only after sustained SoC samples at/below the exit threshold.
 func TestStep_FullBatteryOverride_ExitsOnSocDrop(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
@@ -1568,18 +1568,28 @@ func TestStep_FullBatteryOverride_ExitsOnSocDrop(t *testing.T) {
 		t.Fatal("precondition: override must be active before exit test")
 	}
 
-	// SoC drops to exit threshold (98) → override must deactivate.
+	// First SoC=98 sample: top-band mode must stay active through the debounce.
 	p.set(50, 0)
 	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last := pub.last()
+	if !strings.Contains(last, ",v1=800,") {
+		t.Fatalf("override must stay active on first SoC=98 sample; got %q", last)
+	}
+
+	// Second SoC=98 sample: debounce satisfied → override must deactivate.
+	p.set(50, 0)
+	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
+	_ = c.Step(context.Background())
+	last = pub.last()
 	if strings.Contains(last, ",v1=800,") {
-		t.Errorf("override must deactivate at SoC=98 (exit threshold); got %q", last)
+		t.Errorf("override must deactivate after sustained SoC=98 samples; got %q", last)
 	}
 }
 
 // TestStep_FullBatteryOverride_StaysActive_At99_WithSolar verifies that while
-// active, the override stays on at SoC=99 (above exit=98) with solar present.
+// active, the override stays on across a brief 100↔99 SoC flicker with solar
+// present instead of re-checking the entry threshold every cycle.
 func TestStep_FullBatteryOverride_StaysActive_At99_WithSolar(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
@@ -1587,10 +1597,11 @@ func TestStep_FullBatteryOverride_StaysActive_At99_WithSolar(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 
 	cfg := fullBatteryCfg("topic", "00:00", "23:59")
+	cfg.FullBatteryEnterConsecutiveSamples = 3
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	// Activate.
-	for i := 0; i < 2; i++ {
+	for i := 0; i < cfg.FullBatteryEnterConsecutiveSamples; i++ {
 		p.set(50, 0)
 		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
@@ -1603,15 +1614,24 @@ func TestStep_FullBatteryOverride_StaysActive_At99_WithSolar(t *testing.T) {
 	p.set(50, 0)
 	st.setFresh(devStatusFull(99, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
-	last := pub.last()
-	// delta may suppress re-publish; the important check is that we didn't drop
-	// to a non-800 value on the last publish.
-	// Verify by checking that either still 800 or suppressed (count didn't change).
-	_ = last // accept either outcome — override stays active, which is tested by exit test
+	if !strings.Contains(pub.last(), ",v1=800,") {
+		t.Fatalf("override must remain active at SoC=99 with solar; got %q", pub.last())
+	}
+
+	// A return to 100 on the next sample must still behave as already-active
+	// passthrough mode. If the prior 99 sample had incorrectly deactivated the
+	// mode, this step would not have enough fresh consecutive samples to
+	// re-enter because enterSamples=3.
+	p.set(50, 0)
+	st.setFresh(devStatusFull(100, 50, 50, 123, 123))
+	_ = c.Step(context.Background())
+	if !strings.Contains(pub.last(), ",v1=800,") {
+		t.Errorf("override must survive 100↔99 flicker without dropping out; got %q", pub.last())
+	}
 }
 
 // TestStep_FullBatteryOverride_ExitsOnSolarLoss verifies that the override
-// deactivates when solar drops to zero while SoC is still at 100.
+// deactivates only after sustained solar loss while SoC is still at 100.
 func TestStep_FullBatteryOverride_ExitsOnSolarLoss(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
@@ -1631,13 +1651,22 @@ func TestStep_FullBatteryOverride_ExitsOnSolarLoss(t *testing.T) {
 		t.Fatal("precondition: override must be active")
 	}
 
-	// Solar drops to zero → override must exit.
+	// First zero-solar sample: top-band mode must stay active through the debounce.
 	p.set(50, 0)
 	st.setFresh(devStatusFull(100, 0, 0, 123, 123))
 	_ = c.Step(context.Background())
 	last := pub.last()
+	if !strings.Contains(last, ",v1=800,") {
+		t.Fatalf("override must stay active on first solar=0 sample; got %q", last)
+	}
+
+	// Second zero-solar sample: debounce satisfied → override must exit.
+	p.set(50, 0)
+	st.setFresh(devStatusFull(100, 0, 0, 123, 123))
+	_ = c.Step(context.Background())
+	last = pub.last()
 	if strings.Contains(last, ",v1=800,") {
-		t.Errorf("override must deactivate when solar=0; got %q", last)
+		t.Errorf("override must deactivate after sustained solar=0; got %q", last)
 	}
 }
 
@@ -1695,7 +1724,7 @@ func TestStep_FullBatteryOverride_GatedBySoCFloor(t *testing.T) {
 }
 
 // TestStep_FullBatteryOverride_ReEntersAfterExit verifies that after the
-// override exits (SoC dropped to 98), it can re-enter when SoC climbs back
+// override exits (SoC stays at 98 long enough to satisfy the debounce), it can re-enter when SoC climbs back
 // to 100 with solar, accumulating fresh consecutive samples.
 func TestStep_FullBatteryOverride_ReEntersAfterExit(t *testing.T) {
 	p := &fakeProm{}
@@ -1706,7 +1735,7 @@ func TestStep_FullBatteryOverride_ReEntersAfterExit(t *testing.T) {
 	cfg := fullBatteryCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate, then exit.
+	// Activate, then exit after two consecutive SoC=98 samples.
 	for i := 0; i < 2; i++ {
 		p.set(50, 0)
 		st.setFresh(devStatusFull(100, 50, 50, 123, 123))
@@ -1715,8 +1744,11 @@ func TestStep_FullBatteryOverride_ReEntersAfterExit(t *testing.T) {
 	p.set(50, 0)
 	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
+	p.set(50, 0)
+	st.setFresh(devStatusFull(98, 50, 50, 123, 123))
+	_ = c.Step(context.Background())
 	if strings.Contains(pub.last(), ",v1=800,") {
-		t.Fatal("precondition: override must have exited at SoC=98")
+		t.Fatal("precondition: override must have exited after sustained SoC=98")
 	}
 
 	// Re-enter: two fresh consecutive SoC=100+solar samples.
