@@ -10,10 +10,10 @@ committing to a transport for the controller.
 
 ## Prerequisites
 
-- `uv` installed (<https://github.com/astral-sh/uv>)
+- `uv` installed ([https://github.com/astral-sh/uv](https://github.com/astral-sh/uv))
 - The battery on the same network, reachable by hostname or IP
 - The battery actually online (B2500 units sleep their Wi-Fi stack when SOC is
-  too low, typically below ~5-10%)
+too low, typically below ~5-10%)
 
 No Python install, virtualenv, or `pip install` required. Dependencies are
 declared inline via PEP 723 and resolved by `uv run` automatically.
@@ -43,19 +43,19 @@ Flags:
 1. **DNS resolution** of `--host`.
 2. **TCP port scan** of a small curated list: `22, 80, 443, 502, 1883, 8080, 8123, 8883, 8888`.
 3. **UDP JSON-RPC** on port 30000 with the Venus-family method set:
-   - `Marstek.GetDevice`
-   - `Bat.GetStatus`
-   - `ES.GetStatus`, `ES.GetMode`
-   - `PV.GetStatus`
-   - `Wifi.GetStatus`, `BLE.GetStatus`
-   - `EM.GetStatus`
+  - `Marstek.GetDevice`
+  - `Bat.GetStatus`
+  - `ES.GetStatus`, `ES.GetMode`
+  - `PV.GetStatus`
+  - `Wifi.GetStatus`, `BLE.GetStatus`
+  - `EM.GetStatus`
 4. **HTTP GET** on any of `80 / 8080 / 443` that came back open, against
-   `/`, `/status`, `/info`, `/api`, `/api/status`, `/api/info`, `/device`,
+  `/`, `/status`, `/info`, `/api`, `/api/status`, `/api/info`, `/device`,
    `/metrics`. Response bodies are truncated to 4 KB in the report.
 5. **Modbus TCP** on port 502 (only if open): FC=3 read holding register 0
-   for unit IDs 1..5 until one answers or the sweep ends.
+  for unit IDs 1..5 until one answers or the sweep ends.
 6. **mDNS / Zeroconf** browse for 3 s across common service types
-   (`_http._tcp`, `_mqtt._tcp`, `_marstek._tcp`, `_hame._tcp`, `_esphomelib._tcp`, ...).
+  (`_http._tcp`, `_mqtt._tcp`, `_marstek._tcp`, `_hame._tcp`, `_esphomelib._tcp`, ...).
    Entries advertised by the target IP are highlighted.
 
 All probes are read-only. No writes, no mode changes, no commands are sent.
@@ -67,13 +67,13 @@ summary. The most important rows for the B2500 question are the
 `UDP 30000 Marstek.GetDevice` and `UDP 30000 Bat.GetStatus` lines:
 
 - If **both** respond cleanly: the device speaks the Venus-family Local API and
-  the existing Go controller is a realistic starting point.
+the existing Go controller is a realistic starting point.
 - If only `Marstek.GetDevice` answers: partial support. Worth reading the raw
-  response (use `--verbose`) to see which firmware/model string it returns,
-  then consulting the `MarstekDeviceOpenApi.pdf` for per-model scope.
+response (use `--verbose`) to see which firmware/model string it returns,
+then consulting the `MarstekDeviceOpenApi.pdf` for per-model scope.
 - If the UDP probes all time out: the device almost certainly needs to be
-  pointed at an MQTT broker (via BLE + `hmjs` or the Marstek app) before it
-  will talk to anything locally. Move to setting up Mosquitto + `hm2mqtt`.
+pointed at an MQTT broker (via BLE + `hmjs` or the Marstek app) before it
+will talk to anything locally. Move to setting up Mosquitto + `hm2mqtt`.
 
 The full JSON report under `reports/` contains raw response bodies so you can
 paste them back into planning conversations.
@@ -165,10 +165,127 @@ Tested 2026-04-24 against HMJ-2 `fc=202310231502` → `fc=202409090159`. The FC4
 
 On macOS, the first run will trigger a Bluetooth permission prompt for the terminal.
 
+## MQTT control tool (`mqtt_control.py`)
+
+Once the battery is talking to a local MQTT broker (`ble_probe.py set-mqtt`),
+`mqtt_control.py` lets you inspect and configure the device directly from the
+command line — no app required.
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py status
+```
+
+Default connection settings mirror the repo defaults: host `10.1.1.5`,
+port `1883`, device type `HMJ-2`, device ID `60323bd14b6e`. Override any of
+them with `--host`, `--port`, `--device-type`, and `--device-id`.
+
+### `status`
+
+Poll the device and print a rich summary table: SOC, solar inputs, outputs,
+charging mode, timed-discharge schedule, surplus feed-in state, firmware,
+temperatures, and more.
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py status --host 10.1.1.5 --device-id <id>
+```
+
+### `set-surplus-feed-in` (MQTT only)
+
+Enable or disable the surplus feed-in feature. When enabled, the device feeds
+remaining PV power to the home grid when the battery reaches 100 % SOC.
+
+```bash
+# Enable surplus feed-in (writes to persistent flash — the only supported mode)
+uv run tools/marstek-probe/mqtt_control.py set-surplus-feed-in on
+
+# Disable surplus feed-in
+uv run tools/marstek-probe/mqtt_control.py set-surplus-feed-in off
+```
+
+The underlying device protocol (`cd=31, touchuan_disa=0|1`) only has a flash
+variant — there is no volatile (no-flash) counterpart for this command, so the
+setting survives a reboot. The `--flash` flag is accepted for consistency with
+other subcommands but has no additional effect here.
+
+After the write, the tool reads back `status` automatically to confirm the new
+state. Pass `--no-confirm` to skip the readback.
+
+> **Note on BLE:** the Marstek BLE GATT interface (`ble_probe.py`) does not
+> expose a write path for surplus feed-in. This setting can only be changed over
+> MQTT. If the device is not yet on your local broker, run
+> `ble_probe.py set-mqtt` first (see above).
+
+### `set-dod` — depth of discharge
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py set-dod 80        # temporary
+uv run tools/marstek-probe/mqtt_control.py set-dod 80 --flash  # persistent
+```
+
+### `set-mode` — charging mode
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py set-mode simultaneous
+uv run tools/marstek-probe/mqtt_control.py set-mode charge-then-discharge
+```
+
+### `set-outputs` — enable/disable output ports
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py set-outputs on on   # both on
+uv run tools/marstek-probe/mqtt_control.py set-outputs on off  # only output 1
+```
+
+### `set-threshold` — battery output threshold
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py set-threshold 200
+```
+
+### `sync-time` — sync device clock
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py sync-time
+```
+
+### `restart` — soft-restart the device
+
+The device will be offline for approximately 30 s.
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py restart
+```
+
+### `raw` — send an arbitrary payload
+
+For debugging or testing protocol fields not covered by named subcommands.
+
+```bash
+uv run tools/marstek-probe/mqtt_control.py raw 'cd=1'
+```
+
+### Flash vs. no-flash
+
+Most `set-*` commands default to **volatile** writes (temporary, reset on
+reboot). Pass `--flash` to write to persistent storage. The one exception is
+`set-surplus-feed-in`, which is always a flash write because the device
+protocol (`cd=31`) has no volatile counterpart.
+
+### Common flags
+
+- `--host HOST`           MQTT broker host (default: `10.1.1.5`)
+- `--port PORT`           MQTT broker port (default: `1883`)
+- `--device-type TYPE`    device type (default: `HMJ-2`)
+- `--device-id ID`        device ID (default: `60323bd14b6e`)
+- `--timeout SECS`        response timeout (default: `8.0`)
+- `--flash`               write to persistent flash
+- `--no-confirm`          skip status readback after set commands
+
 ## Tuning
 
 - Run with `--timeout 5.0` if probes are flaky on Wi-Fi.
 - If your network has multiple Marstek devices and you want to discover all
-  of them rather than probe one, use the Go CLI's broadcast discover
-  (`go run ./cmd/marstek-cli discover --host 255.255.255.255`) first and
-  then run this probe against each IP individually.
+of them rather than probe one, use the Go CLI's broadcast discover
+(`go run ./cmd/marstek-cli discover --host 255.255.255.255`) first and
+then run this probe against each IP individually.
+
