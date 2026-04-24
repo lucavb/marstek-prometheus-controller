@@ -92,8 +92,15 @@ setpoint.
 engage. (In practice the two ranges don't overlap, but the precedence is
 explicit.)
 
-**Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `98`) for
+**Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `98`)
+**and** smoothed grid ≤ 0 (balanced or exporting) for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) consecutive control cycles.
+The grid-surplus gate is what prevents the post-`grid_import`-exit flap: on
+the LFP 100% plateau SoC does not drop for many minutes after a secondary
+exit, so a SoC-only entry counter would re-arm in two cycles and put idle
+back on while the grid was still importing. Requiring smoothed ≤ 0 means
+"we actually have surplus to feed back"; any positive smoothed reading
+resets the entry counter.
 
 **Exit (debounced):** `SoC < NEAR_FULL_IDLE_EXIT_PERCENT` (default `95`) for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive control cycles. Normal

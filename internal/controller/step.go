@@ -210,6 +210,11 @@ func (c *Controller) Step(ctx context.Context) error {
 	// exceeds NearFullIdleGridImportExitWatts for
 	// NearFullIdleGridImportExitSamples consecutive cycles, idle exits and
 	// normal control resumes — the battery immediately begins covering load.
+	//
+	// Entry is gated on smoothed <= 0 in addition to SoC, so after a
+	// grid_import exit the enter counter cannot re-arm while the grid is
+	// still importing on the LFP plateau (the SoC-only gate flapped idle
+	// back on within two cycles; see the 2026-04 incident).
 	gatingOK := c.cfg.NearFullIdleEnabled && devStatus.SurplusFeedIn
 	if !gatingOK {
 		if c.nearFullIdleActive {
@@ -233,7 +238,15 @@ func (c *Controller) Step(ctx context.Context) error {
 			requiredSamples = 1
 		}
 		if !c.nearFullIdleActive {
-			if devStatus.SOCPercent >= c.cfg.NearFullIdleEnterPercent {
+			// Idle entry requires both high SoC AND a non-importing grid. The
+			// grid gate breaks the flap the SoC-only check allowed: after a
+			// grid_import exit, SoC is still pinned at the enter threshold on
+			// the LFP plateau, so a SoC-only counter re-fires in two cycles
+			// and idle flaps right back on while the grid is still importing.
+			// Requiring smoothed <= 0 means "we genuinely have surplus to
+			// feed back"; if the grid is importing at all, idling would just
+			// re-cause that import.
+			if devStatus.SOCPercent >= c.cfg.NearFullIdleEnterPercent && smoothed <= 0 {
 				c.nearFullIdleEnterSamples++
 			} else {
 				c.nearFullIdleEnterSamples = 0
@@ -251,6 +264,7 @@ func (c *Controller) Step(ctx context.Context) error {
 					"soc_pct", devStatus.SOCPercent,
 					"enter_pct", c.cfg.NearFullIdleEnterPercent,
 					"exit_pct", c.cfg.NearFullIdleExitPercent,
+					"smoothed_grid_watts", math.Round(smoothed),
 					"surplus_feed_in", devStatus.SurplusFeedIn)
 			}
 		} else {

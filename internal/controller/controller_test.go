@@ -1503,11 +1503,9 @@ func nearFullIdleCfg(ctrl, start, end string) controller.Config {
 	cfg.NearFullIdleEnterPercent = 98
 	cfg.NearFullIdleExitPercent = 95
 	cfg.NearFullIdleConsecutiveSamples = 2
-	// Mirror production defaults. Tests that want to exercise the path set
-	// these explicitly; tests that don't care still pass because the raw
-	// grid values used for activation (50 W) sit at the threshold (strict
-	// `>` in step.go) and never accumulate, and single-cycle high-grid
-	// probes never reach the 8-sample debounce.
+	// Mirror production defaults. Tests that want to exercise the grid-import
+	// exit set these explicitly; the idle-entry gate requires smoothed <= 0,
+	// so activation loops in these tests feed grid=0 W to satisfy it.
 	cfg.NearFullIdleGridImportExitWatts = 50
 	cfg.NearFullIdleGridImportExitSamples = 8
 	return cfg
@@ -1525,9 +1523,9 @@ func TestStep_NearFullIdle_EntryDebounced(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	// Step 1: SoC=98, single sample. Must not disable yet — normal control runs.
-	// Grid import = 50, g1+g2=123+123=246 → rawTarget clamped via bias to a
-	// positive value; the key check is that the slot stays enabled.
-	p.set(50, 0)
+	// Grid=0 W satisfies the smoothed<=0 entry gate; g1+g2=123+123=246 → the
+	// bias path still produces a positive rawTarget and the slot stays enabled.
+	p.set(0, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last1 := pub.last()
@@ -1535,8 +1533,8 @@ func TestStep_NearFullIdle_EntryDebounced(t *testing.T) {
 		t.Errorf("idle must not activate on first sample; got disabled slot %q", last1)
 	}
 
-	// Step 2: second consecutive SoC=98 sample → idle engages → slot disabled.
-	p.set(50, 0)
+	// Step 2: second consecutive SoC=98 sample at grid=0 → idle engages.
+	p.set(0, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last2 := pub.last()
@@ -1560,9 +1558,9 @@ func TestStep_NearFullIdle_StayThroughSoCFlicker(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate: two SoC=98 samples.
+	// Activate: two SoC=98 samples at grid=0 (entry gate requires smoothed<=0).
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
+		p.set(0, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1600,9 +1598,9 @@ func TestStep_NearFullIdle_ExitDebounced(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate.
+	// Activate at grid=0 (entry gate requires smoothed<=0).
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
+		p.set(0, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1648,10 +1646,12 @@ func TestStep_NearFullIdle_DoesNotDischargeOnGridImport(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle.
+	// Activate idle at grid=0 (entry gate requires smoothed<=0). Use g1=g2=123
+	// on activation so we have a non-zero lastCommandWatts for commandIdle to
+	// actually publish the a1=0 disable.
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
-		st.setFresh(devStatusAtSoC(98, 50, 50, 0, 0))
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
 	if !strings.Contains(pub.last(), ",a1=0,") {
@@ -1689,9 +1689,9 @@ func TestStep_NearFullIdle_ExitsOnSustainedGridImport(t *testing.T) {
 	cfg.NearFullIdleGridImportExitWatts = 50
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle at SoC=98 with benign grid (=50, not > threshold).
+	// Activate idle at SoC=98 with surplus grid (=0, satisfies entry gate).
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
+		p.set(0, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1745,9 +1745,9 @@ func TestStep_NearFullIdle_TransientImportDoesNotExit(t *testing.T) {
 	cfg.NearFullIdleGridImportExitWatts = 50
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle.
+	// Activate idle at grid=0 (entry gate requires smoothed<=0).
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
+		p.set(0, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1806,9 +1806,9 @@ func TestStep_NearFullIdle_GridImportExitDisabledByZeroSamples(t *testing.T) {
 	cfg.NearFullIdleGridImportExitWatts = 50
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle.
+	// Activate idle at grid=0 (entry gate requires smoothed<=0).
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
+		p.set(0, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1880,9 +1880,9 @@ func TestStep_NearFullIdle_FallbackClearsState(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle.
+	// Activate idle at grid=0 (entry gate requires smoothed<=0).
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
+		p.set(0, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1897,8 +1897,9 @@ func TestStep_NearFullIdle_FallbackClearsState(t *testing.T) {
 	_ = c.Step(context.Background())
 
 	// Recovery sample 1: fresh post-fallback — debounce must not be carried
-	// over, so idle must NOT instantly re-engage.
-	p.set(50, 0)
+	// over, so idle must NOT instantly re-engage. Grid=0 keeps the entry gate
+	// open so this test isolates the debounce reset rather than the gate.
+	p.set(0, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	countBefore := pub.count()
 	_ = c.Step(context.Background())
@@ -1912,7 +1913,7 @@ func TestStep_NearFullIdle_FallbackClearsState(t *testing.T) {
 	}
 
 	// Recovery sample 2: debounce complete → idle engages again.
-	p.set(50, 0)
+	p.set(0, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	if !strings.Contains(pub.last(), ",a1=0,") {
@@ -1967,9 +1968,9 @@ func TestStep_NearFullIdle_RequiresSurplusFeedIn(t *testing.T) {
 		t.Errorf("idle must not engage while SurplusFeedIn=false; got %q", last)
 	}
 
-	// Flip SurplusFeedIn to true: debounce still applies, so the first sample
-	// must not activate on its own.
-	p.set(50, 0)
+	// Flip SurplusFeedIn to true with grid=0 so the entry gate passes. Debounce
+	// still applies, so the first sample must not activate on its own.
+	p.set(0, 0)
 	st.setFresh(devStatusAtSoC(100, 50, 50, 80, 80))
 	_ = c.Step(context.Background())
 	if strings.Contains(pub.last(), ",a1=0,") && strings.Contains(pub.last(), ",v1=0,") {
@@ -1980,7 +1981,7 @@ func TestStep_NearFullIdle_RequiresSurplusFeedIn(t *testing.T) {
 	}
 
 	// Second sample after flip → idle engages.
-	p.set(50, 0)
+	p.set(0, 0)
 	st.setFresh(devStatusAtSoC(100, 50, 50, 80, 80))
 	_ = c.Step(context.Background())
 	if !strings.Contains(pub.last(), ",a1=0,") {
@@ -2000,9 +2001,9 @@ func TestStep_NearFullIdle_SurplusFeedInFlipExitsIdle(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle with SurplusFeedIn=true.
+	// Activate idle with SurplusFeedIn=true at grid=0 (entry gate).
 	for i := 0; i < 2; i++ {
-		p.set(50, 0)
+		p.set(0, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2018,6 +2019,88 @@ func TestStep_NearFullIdle_SurplusFeedInFlipExitsIdle(t *testing.T) {
 	last := pub.last()
 	if !strings.Contains(last, ",a1=1,") {
 		t.Errorf("idle must exit and re-enable slot when SurplusFeedIn flips off; got %q", last)
+	}
+}
+
+// TestStep_NearFullIdle_DoesNotEnterWhileImporting verifies the grid-surplus
+// entry gate blocks activation while the grid is importing, even when SoC
+// sits at 100 for an arbitrarily long time. Without the gate, a SoC-only
+// counter would engage idle after two cycles and cause the flap.
+func TestStep_NearFullIdle_DoesNotEnterWhileImporting(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// 30 cycles at SoC=100 with a +100 W grid import. smoothed stays > 0 so
+	// the entry counter must never accumulate. Every published command must
+	// stay on the enabled-slot path (a1=1 with v1>0), never the idle signature.
+	for i := 0; i < 30; i++ {
+		p.set(100, 0)
+		st.setFresh(devStatusAtSoC(100, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+		last := pub.last()
+		if strings.Contains(last, ",a1=0,") && strings.Contains(last, ",v1=0,") {
+			t.Fatalf("cycle %d: idle must not engage while grid is importing; got %q", i, last)
+		}
+	}
+}
+
+// TestStep_NearFullIdle_NoFlapAfterGridImportExit reproduces the 2026-04
+// incident: idle activates, a sustained grid import trips the grid_import
+// exit, and normal control then settles at a small positive grid import
+// (~ImportBiasWatts) while SoC is still pinned at 100 on the LFP plateau.
+// Before the entry gate, the SoC-only debounce re-fired in two cycles and
+// idle flapped back on. With the gate, smoothed > 0 blocks re-entry for as
+// long as the grid keeps importing.
+func TestStep_NearFullIdle_NoFlapAfterGridImportExit(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	// Short debounce so the exit fires in a handful of cycles.
+	cfg.NearFullIdleGridImportExitSamples = 3
+	cfg.NearFullIdleGridImportExitWatts = 50
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Activate idle at SoC=100, grid=0.
+	for i := 0; i < 2; i++ {
+		p.set(0, 0)
+		st.setFresh(devStatusAtSoC(100, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	if !strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatal("precondition: idle must be active")
+	}
+
+	// Drive the grid_import exit: N consecutive high-import cycles. On the
+	// Nth cycle idle exits and normal control publishes an enabled slot.
+	for i := 0; i < cfg.NearFullIdleGridImportExitSamples; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoC(100, 50, 50, 0, 0))
+		_ = c.Step(context.Background())
+	}
+	if !strings.Contains(pub.last(), ",a1=1,") {
+		t.Fatalf("precondition: grid_import exit must fire and re-enable slot; got %q", pub.last())
+	}
+
+	// Post-exit: grid settles at +25 W (a realistic ImportBias-sized residual),
+	// SoC still pinned at 100 on the LFP plateau. Over many cycles, the entry
+	// gate must keep idle off — any idle publish signature (a1=0 v1=0) is the
+	// regression this test guards against.
+	for i := 0; i < 30; i++ {
+		p.set(25, 0)
+		st.setFresh(devStatusAtSoC(100, 50, 50, 0, 0))
+		_ = c.Step(context.Background())
+		last := pub.last()
+		if strings.Contains(last, ",a1=0,") && strings.Contains(last, ",v1=0,") {
+			t.Fatalf("cycle %d after grid_import exit: idle must not re-engage while grid is importing; got %q", i, last)
+		}
 	}
 }
 
