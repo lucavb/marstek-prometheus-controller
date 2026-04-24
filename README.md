@@ -18,11 +18,11 @@ Works with any `hame_energy`-protocol Marstek device (HMJ-2 and siblings).
    [prometheus-marstek-mqtt-exporter](https://github.com/lucavb/prometheus-marstek-mqtt-exporter)
    subscribes to — no conflict, no extra polling load).
 3. **Control law**: `next_slot_power = EMA(grid_watts) − IMPORT_BIAS_WATTS`
-   clamped to `[0, MAX_OUTPUT_WATTS]`, with ramp limits and a minimum hold time
+  clamped to `[0, MAX_OUTPUT_WATTS]`, with ramp limits and a minimum hold time
    to avoid command chatter.
   - Grid importing (positive watts) → increase slot power (offset by bias).
   - Grid exporting (negative watts) → reduce slot power to zero immediately
-    (ramp-down limit is bypassed when export is detected, see [Control bias](#control-bias)).
+  (ramp-down limit is bypassed when export is detected, see [Control bias](#control-bias)).
 4. The full 5-slot timed-discharge schedule is published on every write
   (`cd=20`, volatile — no flash wear), with only the controlled slot's power
    changed. Other slots are preserved exactly as the device reported them.
@@ -39,12 +39,14 @@ The raw discharge target is `EMA(grid_watts) − IMPORT_BIAS_WATTS`. This means
 the battery always tries to leave a small deliberate import rather than driving
 the grid meter to exact zero. For example, with the default 50 W bias:
 
+
 | Grid reading | Target slot power |
-|---|---|
-| 300 W import | 250 W discharge |
-| 50 W import | 0 W (floor) |
-| 0 W | 0 W |
-| −50 W export | 0 W (floor) |
+| ------------ | ----------------- |
+| 300 W import | 250 W discharge   |
+| 50 W import  | 0 W (floor)       |
+| 0 W          | 0 W               |
+| −50 W export | 0 W (floor)       |
+
 
 The reasoning is practical: any energy the battery discharges that ends up
 exported to the grid is permanently lost. Over-importing by 50 W costs at most
@@ -82,13 +84,13 @@ publishes a schedule with the slot disabled (`a<N>=0`, `v<N>=0`) and otherwise
 gets out of the way:
 
 - The battery does **not** discharge in the top band — even if the meter shows
-  grid import.
+grid import.
 - Excess PV is routed to the grid by the device's firmware (provided surplus
-  feed-in is enabled in the app), not by the controller commanding a discharge
-  setpoint.
+feed-in is enabled in the app), not by the controller commanding a discharge
+setpoint.
 - The SoC soft floor still wins: if it's active, near-full idle does not
-  engage. (In practice the two ranges don't overlap, but the precedence is
-  explicit.)
+engage. (In practice the two ranges don't overlap, but the precedence is
+explicit.)
 
 **Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `98`) for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) consecutive control cycles.
@@ -129,49 +131,49 @@ SoC levels.
 All settings are environment variables:
 
 
-| Variable                      | Default                    | Description                                                         |
-| ----------------------------- | -------------------------- | ------------------------------------------------------------------- |
-| `PROMETHEUS_BASE_URL`         | *required*                 | Prometheus base URL, e.g. `http://prometheus:9090`                  |
-| `PROMETHEUS_GRID_POWER_QUERY` | `electricity_power_watts`  | PromQL expression returning grid power in watts                     |
-| `PROMETHEUS_TIMEOUT`          | `5s`                       | HTTP timeout for Prometheus queries                                 |
-| `PROMETHEUS_STALE_AFTER`      | `60s`                      | Reject samples older than this                                      |
-| `MQTT_BROKER_URL`             | *required*                 | MQTT broker URL, e.g. `tcp://10.1.1.5:1883`                         |
-| `MQTT_USERNAME`               | ``                         | Optional broker username                                            |
-| `MQTT_PASSWORD`               | ``                         | Optional broker password                                            |
-| `MQTT_CLIENT_ID`              | `marstek-controller-<pid>` | MQTT client ID                                                      |
-| `MARSTEK_DEVICE_TYPE`         | `HMJ-2`                    | Device type segment in MQTT topics                                  |
-| `MARSTEK_DEVICE_ID`           | *required*                 | Device ID segment in MQTT topics                                    |
-| `MQTT_STATUS_STALE_AFTER`     | `2m`                       | Self-poll if no status received in this long                        |
-| `MQTT_STATUS_POLL_TIMEOUT`    | `5s`                       | Timeout for the self-poll response                                  |
-| `MQTT_STATUS_HARD_FAIL_AFTER` | `5m`                       | Fall back to zero discharge after this much silence                 |
-| `CONTROL_INTERVAL`            | `15s`                      | Control loop cadence                                                |
-| `SMOOTHING_ALPHA`             | `0.5`                      | EMA factor for the grid-power signal (0–1, higher = less smoothing) |
-| `DEADBAND_WATTS`              | `25`                       | Suppress commands when smoothed power is within this band           |
-| `IMPORT_BIAS_WATTS`           | `50`                       | Deliberate grid-import headroom; subtracted from the raw target so the battery always leaves this much import rather than driving to exact zero (see [Control bias](#control-bias)) |
-| `RAMP_UP_WATTS_PER_CYCLE`     | `150`                      | Maximum discharge increase per loop iteration; `0` = unlimited      |
-| `RAMP_DOWN_WATTS_PER_CYCLE`   | `300`                      | Maximum discharge decrease per loop iteration; `0` = unlimited. Bypassed on active export — see [Control bias](#control-bias). Bypassed on active export also skips `MIN_HOLD_TIME` for that cycle. |
-| `MIN_COMMAND_DELTA_WATTS`     | `25`                       | Suppress writes where the change vs. the last command is smaller than this value (applies when smoothed grid >= 0, i.e. importing or idle). |
-| `MIN_COMMAND_DELTA_WATTS_EXPORTING` | `5`               | Same idea but applied when the smoothed grid is negative (exporting). Defaults to `5` so 1–4 W meter noise around zero does not republish the same schedule, while still responding aggressively to real export events. Set to `0` to never filter during export. |
-| `MIN_HOLD_TIME`               | `30s`                      | Minimum time between published commands                             |
-| `MIN_OUTPUT_WATTS`            | `80`                       | Lower clamp on non-zero slot power. The B2500 silently clamps `v=0..79` to 80 W on an enabled slot; any computed target in that range is snapped up to this value. A target of exactly 0 W disables the slot (`a<N>=0`) — the only real way to stop discharge. |
-| `MAX_OUTPUT_WATTS`            | `800`                      | Hard cap on slot power (device max is 800 W)                        |
-| `SCHEDULE_SLOT`               | `1`                        | Which timed-discharge slot to drive (1–5)                           |
-| `SCHEDULE_START`              | `00:00`                    | Slot start time written to the device                               |
-| `SCHEDULE_END`                | `23:59`                    | Slot end time written to the device                                 |
-| `HTTP_LISTEN_ADDR`            | `:8080`                    | HTTP bind address                                                   |
-| `LOG_LEVEL`                   | `info`                     | `debug`, `info`, `warn`, `error`                                    |
-| `LOG_FORMAT`                  | `text`                     | `text` or `json`                                                    |
-| `PERSIST_TO_FLASH`            | `false`                    | Write to persistent flash (`cd=7`) instead of volatile (`cd=20`)    |
-| `ALLOW_FLASH_WRITES`          | `false`                    | Must be `true` to enable `PERSIST_TO_FLASH` (foot-gun guard)        |
-| `BATTERY_SOC_FLOOR_MARGIN_PERCENT` | `2`               | Added to `(100 − device DoD%)` to derive the controller SoC soft floor. When SoC falls at or below this floor, discharge is suppressed until SoC recovers by `BATTERY_SOC_HYSTERESIS_PERCENT`. |
-| `BATTERY_SOC_HYSTERESIS_PERCENT`   | `5`               | Hysteresis band above the soft floor; discharge only resumes once SoC ≥ `(soft_floor + hysteresis)`. Prevents rapid on/off cycling near the floor. |
-| `BATTERY_SOC_FLOOR_FALLBACK_PERCENT` | `15`            | Absolute SoC floor used when the device status does not report a DoD value (`do=0`). |
-| `NEAR_FULL_IDLE_ENABLED`           | `true`            | Enable the near-full idle regime (see [Near-full idle](#near-full-idle)). Set to `false` to disable entirely; the controller will run normal grid-meter-driven control at all SoC levels. |
-| `NEAR_FULL_IDLE_ENTER_PERCENT`     | `98`              | SoC threshold to enter idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples at or above it. Must satisfy `0 ≤ EXIT_PERCENT < ENTER_PERCENT ≤ 100`. |
-| `NEAR_FULL_IDLE_EXIT_PERCENT`      | `95`              | SoC threshold to exit idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples strictly below it. The 3-point hysteresis band rides through LFP top-end SoC flicker. |
-| `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` | `2`             | Debounce length (in control cycles) for both idle entry and exit. Must be ≥ 1. Surplus-feed-in flipping off bypasses this debounce and exits immediately. |
-| `DEVICE_RESTART_SCHEDULE`           | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4 * * *` for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart). |
-| `DEVICE_RESTART_TIMEZONE`           | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty. |
+| Variable                             | Default                    | Description                                                                                                                                                                                                                                                       |
+| ------------------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PROMETHEUS_BASE_URL`                | *required*                 | Prometheus base URL, e.g. `http://prometheus:9090`                                                                                                                                                                                                                |
+| `PROMETHEUS_GRID_POWER_QUERY`        | `electricity_power_watts`  | PromQL expression returning grid power in watts                                                                                                                                                                                                                   |
+| `PROMETHEUS_TIMEOUT`                 | `5s`                       | HTTP timeout for Prometheus queries                                                                                                                                                                                                                               |
+| `PROMETHEUS_STALE_AFTER`             | `60s`                      | Reject samples older than this                                                                                                                                                                                                                                    |
+| `MQTT_BROKER_URL`                    | *required*                 | MQTT broker URL, e.g. `tcp://10.1.1.5:1883`                                                                                                                                                                                                                       |
+| `MQTT_USERNAME`                      | ``                         | Optional broker username                                                                                                                                                                                                                                          |
+| `MQTT_PASSWORD`                      | ``                         | Optional broker password                                                                                                                                                                                                                                          |
+| `MQTT_CLIENT_ID`                     | `marstek-controller-<pid>` | MQTT client ID                                                                                                                                                                                                                                                    |
+| `MARSTEK_DEVICE_TYPE`                | `HMJ-2`                    | Device type segment in MQTT topics                                                                                                                                                                                                                                |
+| `MARSTEK_DEVICE_ID`                  | *required*                 | Device ID segment in MQTT topics                                                                                                                                                                                                                                  |
+| `MQTT_STATUS_STALE_AFTER`            | `2m`                       | Self-poll if no status received in this long                                                                                                                                                                                                                      |
+| `MQTT_STATUS_POLL_TIMEOUT`           | `5s`                       | Timeout for the self-poll response                                                                                                                                                                                                                                |
+| `MQTT_STATUS_HARD_FAIL_AFTER`        | `5m`                       | Fall back to zero discharge after this much silence                                                                                                                                                                                                               |
+| `CONTROL_INTERVAL`                   | `15s`                      | Control loop cadence                                                                                                                                                                                                                                              |
+| `SMOOTHING_ALPHA`                    | `0.5`                      | EMA factor for the grid-power signal (0–1, higher = less smoothing)                                                                                                                                                                                               |
+| `DEADBAND_WATTS`                     | `25`                       | Suppress commands when smoothed power is within this band                                                                                                                                                                                                         |
+| `IMPORT_BIAS_WATTS`                  | `50`                       | Deliberate grid-import headroom; subtracted from the raw target so the battery always leaves this much import rather than driving to exact zero (see [Control bias](#control-bias))                                                                               |
+| `RAMP_UP_WATTS_PER_CYCLE`            | `150`                      | Maximum discharge increase per loop iteration; `0` = unlimited                                                                                                                                                                                                    |
+| `RAMP_DOWN_WATTS_PER_CYCLE`          | `300`                      | Maximum discharge decrease per loop iteration; `0` = unlimited. Bypassed on active export — see [Control bias](#control-bias). Bypassed on active export also skips `MIN_HOLD_TIME` for that cycle.                                                               |
+| `MIN_COMMAND_DELTA_WATTS`            | `25`                       | Suppress writes where the change vs. the last command is smaller than this value (applies when smoothed grid >= 0, i.e. importing or idle).                                                                                                                       |
+| `MIN_COMMAND_DELTA_WATTS_EXPORTING`  | `5`                        | Same idea but applied when the smoothed grid is negative (exporting). Defaults to `5` so 1–4 W meter noise around zero does not republish the same schedule, while still responding aggressively to real export events. Set to `0` to never filter during export. |
+| `MIN_HOLD_TIME`                      | `30s`                      | Minimum time between published commands                                                                                                                                                                                                                           |
+| `MIN_OUTPUT_WATTS`                   | `80`                       | Lower clamp on non-zero slot power. The B2500 silently clamps `v=0..79` to 80 W on an enabled slot; any computed target in that range is snapped up to this value. A target of exactly 0 W disables the slot (`a<N>=0`) — the only real way to stop discharge.    |
+| `MAX_OUTPUT_WATTS`                   | `800`                      | Hard cap on slot power (device max is 800 W)                                                                                                                                                                                                                      |
+| `SCHEDULE_SLOT`                      | `1`                        | Which timed-discharge slot to drive (1–5)                                                                                                                                                                                                                         |
+| `SCHEDULE_START`                     | `00:00`                    | Slot start time written to the device                                                                                                                                                                                                                             |
+| `SCHEDULE_END`                       | `23:59`                    | Slot end time written to the device                                                                                                                                                                                                                               |
+| `HTTP_LISTEN_ADDR`                   | `:8080`                    | HTTP bind address                                                                                                                                                                                                                                                 |
+| `LOG_LEVEL`                          | `info`                     | `debug`, `info`, `warn`, `error`                                                                                                                                                                                                                                  |
+| `LOG_FORMAT`                         | `text`                     | `text` or `json`                                                                                                                                                                                                                                                  |
+| `PERSIST_TO_FLASH`                   | `false`                    | Write to persistent flash (`cd=7`) instead of volatile (`cd=20`)                                                                                                                                                                                                  |
+| `ALLOW_FLASH_WRITES`                 | `false`                    | Must be `true` to enable `PERSIST_TO_FLASH` (foot-gun guard)                                                                                                                                                                                                      |
+| `BATTERY_SOC_FLOOR_MARGIN_PERCENT`   | `2`                        | Added to `(100 − device DoD%)` to derive the controller SoC soft floor. When SoC falls at or below this floor, discharge is suppressed until SoC recovers by `BATTERY_SOC_HYSTERESIS_PERCENT`.                                                                    |
+| `BATTERY_SOC_HYSTERESIS_PERCENT`     | `5`                        | Hysteresis band above the soft floor; discharge only resumes once SoC ≥ `(soft_floor + hysteresis)`. Prevents rapid on/off cycling near the floor.                                                                                                                |
+| `BATTERY_SOC_FLOOR_FALLBACK_PERCENT` | `15`                       | Absolute SoC floor used when the device status does not report a DoD value (`do=0`).                                                                                                                                                                              |
+| `NEAR_FULL_IDLE_ENABLED`             | `true`                     | Enable the near-full idle regime (see [Near-full idle](#near-full-idle)). Set to `false` to disable entirely; the controller will run normal grid-meter-driven control at all SoC levels.                                                                         |
+| `NEAR_FULL_IDLE_ENTER_PERCENT`       | `98`                       | SoC threshold to enter idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples at or above it. Must satisfy `0 ≤ EXIT_PERCENT < ENTER_PERCENT ≤ 100`.                                                                                                 |
+| `NEAR_FULL_IDLE_EXIT_PERCENT`        | `95`                       | SoC threshold to exit idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples strictly below it. The 3-point hysteresis band rides through LFP top-end SoC flicker.                                                                                   |
+| `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` | `2`                        | Debounce length (in control cycles) for both idle entry and exit. Must be ≥ 1. Surplus-feed-in flipping off bypasses this debounce and exits immediately.                                                                                                         |
+| `DEVICE_RESTART_SCHEDULE`            | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4 `* * * for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart).                                     |
+| `DEVICE_RESTART_TIMEZONE`            | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty.                                                                                                                                         |
 
 
 ## Scheduled device restart
@@ -197,12 +199,13 @@ For zones with daylight saving time, avoid scheduling during the `02:00–03:00`
 
 ### Metrics
 
-| Metric | Description |
-|---|---|
-| `marstek_controller_device_restart_info{spec, timezone}` | Value 1 while the scheduler is active; not emitted when disabled. |
-| `marstek_controller_device_restarts_total{outcome}` | Restart commands by outcome: `sent`, `skipped_not_connected`, `publish_error`. |
-| `marstek_controller_last_device_restart_timestamp_seconds` | Unix timestamp of the last successful restart command. |
-| `marstek_controller_next_device_restart_timestamp_seconds` | Unix timestamp of the next scheduled fire. |
+
+| Metric                                                     | Description                                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `marstek_controller_device_restart_info{spec, timezone}`   | Value 1 while the scheduler is active; not emitted when disabled.              |
+| `marstek_controller_device_restarts_total{outcome}`        | Restart commands by outcome: `sent`, `skipped_not_connected`, `publish_error`. |
+| `marstek_controller_last_device_restart_timestamp_seconds` | Unix timestamp of the last successful restart command.                         |
+| `marstek_controller_next_device_restart_timestamp_seconds` | Unix timestamp of the next scheduled fire.                                     |
 
 
 ## Deployment
@@ -235,10 +238,10 @@ PROMETHEUS_BASE_URL=http://prometheus:9090 \
 ## HTTP Endpoints
 
 
-| Path           | Description                                                                                      |
-| -------------- | ------------------------------------------------------------------------------------------------ |
-| `GET /metrics` | Prometheus scrape endpoint (controller's own metrics)                                            |
-| `GET /healthz` | Liveness: always `200 ok` while the process is up                                                |
+| Path           | Description                                                                                                                                                                         |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /metrics` | Prometheus scrape endpoint (controller's own metrics)                                                                                                                               |
+| `GET /healthz` | Liveness: always `200 ok` while the process is up                                                                                                                                   |
 | `GET /readyz`  | Readiness: `200 ok` once the controller has completed at least one full control step that successfully read Prometheus and observed a live device status over MQTT; `503` otherwise |
 
 
@@ -265,23 +268,23 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 **Controller state**
 
 
-| Metric                       | Type  | Description                                                    |
-| ---------------------------- | ----- | -------------------------------------------------------------- |
-| `grid_power_watts`           | Gauge | Last Prometheus sample (W)                                     |
-| `smoothed_grid_power_watts`  | Gauge | EMA-smoothed signal driving control (W)                        |
-| `target_slot_power_watts`    | Gauge | Computed target before ramp/hold limits (W)                    |
-| `commanded_slot_power_watts` | Gauge | Last value published to the device (W)                         |
-| `slot_index`                 | Gauge | Slot being driven (1–5)                                        |
-| `min_output_watts`           | Gauge | Lower clamp on non-zero commanded slot power (W)               |
-| `max_output_watts`           | Gauge | Effective upper clamp (W)                                      |
-| `state`                      | Gauge | 0=starting, 1=idle, 2=discharging, 3=holding, 4=fallback       |
-| `info`                       | Gauge | Always 1; labels carry version, device_type, device_id, broker |
-| `battery_soc_percent`        | Gauge | Device-reported battery SoC (%) as seen by the controller      |
+| Metric                           | Type  | Description                                                                           |
+| -------------------------------- | ----- | ------------------------------------------------------------------------------------- |
+| `grid_power_watts`               | Gauge | Last Prometheus sample (W)                                                            |
+| `smoothed_grid_power_watts`      | Gauge | EMA-smoothed signal driving control (W)                                               |
+| `target_slot_power_watts`        | Gauge | Computed target before ramp/hold limits (W)                                           |
+| `commanded_slot_power_watts`     | Gauge | Last value published to the device (W)                                                |
+| `slot_index`                     | Gauge | Slot being driven (1–5)                                                               |
+| `min_output_watts`               | Gauge | Lower clamp on non-zero commanded slot power (W)                                      |
+| `max_output_watts`               | Gauge | Effective upper clamp (W)                                                             |
+| `state`                          | Gauge | 0=starting, 1=idle, 2=discharging, 3=holding, 4=fallback                              |
+| `info`                           | Gauge | Always 1; labels carry version, device_type, device_id, broker                        |
+| `battery_soc_percent`            | Gauge | Device-reported battery SoC (%) as seen by the controller                             |
 | `battery_soc_soft_floor_percent` | Gauge | Derived SoC soft floor: `(100−DoD)+margin`. Discharge is suppressed below this value. |
-| `battery_temp_min_celsius`   | Gauge | Device-reported minimum cell temperature (°C); observability only |
-| `battery_temp_max_celsius`   | Gauge | Device-reported maximum cell temperature (°C); observability only |
-| `near_full_idle_active`      | Gauge | 1 while the controller is in the near-full idle regime (slot disabled); 0 otherwise |
-| `surplus_feed_in_enabled`    | Gauge | 1 when the device has surplus feed-in enabled (`tc_dis=0`); 0 when disabled |
+| `battery_temp_min_celsius`       | Gauge | Device-reported minimum cell temperature (°C); observability only                     |
+| `battery_temp_max_celsius`       | Gauge | Device-reported maximum cell temperature (°C); observability only                     |
+| `near_full_idle_active`          | Gauge | 1 while the controller is in the near-full idle regime (slot disabled); 0 otherwise   |
+| `surplus_feed_in_enabled`        | Gauge | 1 when the device has surplus feed-in enabled (`tc_dis=0`); 0 when disabled           |
 
 
 **Dependency health**
@@ -300,22 +303,22 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 **Activity**
 
 
-| Metric                          | Type      | Labels   | Description                                                                               |
-| ------------------------------- | --------- | -------- | ----------------------------------------------------------------------------------------- |
-| `prometheus_queries_total`      | Counter   |          | Total Prometheus queries                                                                  |
-| `prometheus_errors_total`       | Counter   | `reason` | Query errors (stale, timeout, parse, empty, other)                                        |
-| `mqtt_publishes_total`          | Counter   | `kind`   | Publishes by kind: `write`, `self_poll`                                                   |
-| `mqtt_publish_errors_total`     | Counter   | `reason` | Publish failures (disconnected, timeout, other)                                           |
-| `mqtt_reconnects_total`         | Counter   |          | Times the MQTT client reconnected                                                         |
-| `mqtt_status_messages_total`    | Counter   |          | Total device status messages received                                                     |
-| `self_polls_total`              | Counter   |          | Times the controller self-polled (status was stale)                                       |
-| `control_cycles_total`          | Counter   |          | Total control loop iterations                                                             |
-| `command_suppressed_total`      | Counter   | `reason` | Suppressed commands (`deadband`, `delta`, `hold_time`, `disconnected`, `status_stale`, `soc_floor`, `transient_zero_output`, `near_full_idle`) |
-| `fallback_total`                | Counter   | `reason` | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error) |
-| `near_full_idle_entered_total`  | Counter   |          | Times the near-full idle regime has been activated (rising edge) |
-| `near_full_idle_exited_total`   | Counter   |          | Times the near-full idle regime has been deactivated (falling edge) |
-| `near_full_idle_exit_reason_total` | Counter | `reason` | Reason-specific exits from near-full idle (`soc_exit`, `fallback`, `surplus_feed_in_disabled`, `disabled`) |
-| `control_loop_duration_seconds` | Histogram |          | Wall time per control cycle                                                               |
+| Metric                             | Type      | Labels   | Description                                                                                                                                    |
+| ---------------------------------- | --------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prometheus_queries_total`         | Counter   |          | Total Prometheus queries                                                                                                                       |
+| `prometheus_errors_total`          | Counter   | `reason` | Query errors (stale, timeout, parse, empty, other)                                                                                             |
+| `mqtt_publishes_total`             | Counter   | `kind`   | Publishes by kind: `write`, `self_poll`                                                                                                        |
+| `mqtt_publish_errors_total`        | Counter   | `reason` | Publish failures (disconnected, timeout, other)                                                                                                |
+| `mqtt_reconnects_total`            | Counter   |          | Times the MQTT client reconnected                                                                                                              |
+| `mqtt_status_messages_total`       | Counter   |          | Total device status messages received                                                                                                          |
+| `self_polls_total`                 | Counter   |          | Times the controller self-polled (status was stale)                                                                                            |
+| `control_cycles_total`             | Counter   |          | Total control loop iterations                                                                                                                  |
+| `command_suppressed_total`         | Counter   | `reason` | Suppressed commands (`deadband`, `delta`, `hold_time`, `disconnected`, `status_stale`, `soc_floor`, `transient_zero_output`, `near_full_idle`) |
+| `fallback_total`                   | Counter   | `reason` | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error)                                                      |
+| `near_full_idle_entered_total`     | Counter   |          | Times the near-full idle regime has been activated (rising edge)                                                                               |
+| `near_full_idle_exited_total`      | Counter   |          | Times the near-full idle regime has been deactivated (falling edge)                                                                            |
+| `near_full_idle_exit_reason_total` | Counter   | `reason` | Reason-specific exits from near-full idle (`soc_exit`, `fallback`, `surplus_feed_in_disabled`, `disabled`)                                     |
+| `control_loop_duration_seconds`    | Histogram |          | Wall time per control cycle                                                                                                                    |
 
 
 ### Migration: full-battery override → near-full idle
@@ -330,21 +333,22 @@ firmware's own surplus-feed-in path carry excess PV to the grid.
 If you have dashboards or alerts referencing the old surface, replace them as
 follows:
 
-| Removed (no longer exposed)                    | Replacement                                                  |
-| ---------------------------------------------- | ------------------------------------------------------------ |
-| `FULL_BATTERY_OVERRIDE_ENABLED`                | `NEAR_FULL_IDLE_ENABLED`                                     |
-| `FULL_BATTERY_SOC_ENTER_PERCENT`               | `NEAR_FULL_IDLE_ENTER_PERCENT`                               |
-| `FULL_BATTERY_SOC_EXIT_PERCENT`                | `NEAR_FULL_IDLE_EXIT_PERCENT`                                |
-| `FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES`       | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES`                         |
-| `marstek_controller_full_battery_override_active`         | `marstek_controller_near_full_idle_active`        |
-| `marstek_controller_full_battery_override_entered_total`  | `marstek_controller_near_full_idle_entered_total` |
-| `marstek_controller_full_battery_override_exited_total`   | `marstek_controller_near_full_idle_exited_total`  |
+
+| Removed (no longer exposed)                                  | Replacement                                                                                                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `FULL_BATTERY_OVERRIDE_ENABLED`                              | `NEAR_FULL_IDLE_ENABLED`                                                                                                        |
+| `FULL_BATTERY_SOC_ENTER_PERCENT`                             | `NEAR_FULL_IDLE_ENTER_PERCENT`                                                                                                  |
+| `FULL_BATTERY_SOC_EXIT_PERCENT`                              | `NEAR_FULL_IDLE_EXIT_PERCENT`                                                                                                   |
+| `FULL_BATTERY_ENTER_CONSECUTIVE_SAMPLES`                     | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES`                                                                                            |
+| `marstek_controller_full_battery_override_active`            | `marstek_controller_near_full_idle_active`                                                                                      |
+| `marstek_controller_full_battery_override_entered_total`     | `marstek_controller_near_full_idle_entered_total`                                                                               |
+| `marstek_controller_full_battery_override_exited_total`      | `marstek_controller_near_full_idle_exited_total`                                                                                |
 | `marstek_controller_full_battery_override_exit_reason_total` | `marstek_controller_near_full_idle_exit_reason_total` (reasons: `soc_exit`, `fallback`, `surplus_feed_in_disabled`, `disabled`) |
+
 
 Old environment variables no longer have any effect — they will be ignored on
 startup. Old metrics simply disappear from `/metrics`; recording rules and
 alerts referencing them must be updated to the new names.
-
 
 ### Suggested Alert Rules
 
@@ -412,14 +416,14 @@ This matches known ESP-IDF Wi-Fi bugs:
 Observed characteristics (firmware `110.9` on the `HMJ-2` / B2500-D):
 
 - The battery is **not** fully dead during the outage; it is repeatedly
-  authenticating and associating, but failing the WPA2 key handshake.
+authenticating and associating, but failing the WPA2 key handshake.
 - RF is fine. In the investigated case the AP saw about `-53 dBm`, which rules
-  out poor signal as the primary cause.
+out poor signal as the primary cause.
 - The device does **not** self-recover within any reasonable window. Measured:
-  **405** `AP-STA-POSSIBLE-PSK-MISMATCH` attempts, **0** successful handshakes,
-  and 7 deauthentications over 60 min on a dedicated SSID.
+**405** `AP-STA-POSSIBLE-PSK-MISMATCH` attempts, **0** successful handshakes,
+and 7 deauthentications over 60 min on a dedicated SSID.
 - The PSK is correct; the same PSK works on other devices on the same SSID,
-  and works for this device immediately after either recovery step below.
+and works for this device immediately after either recovery step below.
 
 AP-side mitigations that were tried and do **not** prevent the lockup (they
 were kept for hygiene but the device still enters the loop regardless):
@@ -427,7 +431,7 @@ were kept for hygiene but the device still enters the loop regardless):
 - Put the battery on its own dedicated 2.4 GHz SSID
 - Keep it on the existing IoT VLAN/network
 - Use `psk2` with `wpa_group_rekey = 86400`, `wpa_disable_eapol_key_retries = true`,
-  and `ieee80211w = "0"`
+and `ieee80211w = "0"`
 
 The point of the dedicated SSID is to scope these more permissive settings to
 the single misbehaving client instead of weakening the shared IoT SSID for
@@ -441,32 +445,23 @@ supplicant that ships inside the battery. No hostapd tuning will fix it.
 Two paths, both of which immediately re-associate the device cleanly:
 
 1. **Re-send `CMD_SET_WIFI` (0x05) over BLE.** This is the scripted path used
-   in this repo, equivalent to entering WiFi credentials in the Marstek app:
-
-   ```bash
-   uv run tools/marstek-probe/ble_probe.py set-wifi \
-       --ssid <your-ssid>
-   # prompts for password on a tty, or reads MARSTEK_WIFI_PASSWORD env var,
-   # or accepts --password 'xxx'
-   ```
-
+  in this repo, equivalent to entering WiFi credentials in the Marstek app:
    Must be run within ~10 m of the battery. See
-   [`tools/marstek-probe/README.md`](tools/marstek-probe/README.md#set-wifi-destructive)
+   `[tools/marstek-probe/README.md](tools/marstek-probe/README.md#set-wifi-destructive)`
    for the full flag surface.
-
 2. **Cold power cycle** the battery (a smart plug works). Slightly slower,
-   but usable without BLE range. A future iteration may automate this via a
+  but usable without BLE range. A future iteration may automate this via a
    controller metric + smart-plug watchdog; not yet implemented.
 
 ### What to watch
 
 - `marstek_controller_device_last_status_seconds` should normally stay low and
-  grow only briefly during transient MQTT or Wi-Fi gaps.
+grow only briefly during transient MQTT or Wi-Fi gaps.
 - A sustained climb past half of `MQTT_STATUS_HARD_FAIL_AFTER` triggers a
-  throttled warning log. Past the full `MQTT_STATUS_HARD_FAIL_AFTER` threshold,
-  the controller falls back to zero discharge.
+throttled warning log. Past the full `MQTT_STATUS_HARD_FAIL_AFTER` threshold,
+the controller falls back to zero discharge.
 - Cheap IoT Wi-Fi stacks often drop or delay ICMP even when application traffic
-  is fine, so packet loss alone is not enough evidence of RF trouble.
+is fine, so packet loss alone is not enough evidence of RF trouble.
 
 ### Reporting to the vendor
 
@@ -479,12 +474,14 @@ and the `hostapd` log pattern above is the most useful form of pressure.
 
 The Docker image defaults to `LOG_FORMAT=json`. Every log line is a JSON object on stdout with the fields:
 
-| Field | Example | Description |
-|---|---|---|
-| `time` | `2026-04-18T11:30:00.123Z` | RFC 3339 timestamp |
-| `level` | `info` | Lowercase level: `debug`, `info`, `warn`, `error` |
-| `msg` | `schedule updated` | Log message |
-| `slot` | `1` | Structured key–value pairs added per call site |
+
+| Field   | Example                    | Description                                       |
+| ------- | -------------------------- | ------------------------------------------------- |
+| `time`  | `2026-04-18T11:30:00.123Z` | RFC 3339 timestamp                                |
+| `level` | `info`                     | Lowercase level: `debug`, `info`, `warn`, `error` |
+| `msg`   | `schedule updated`         | Log message                                       |
+| `slot`  | `1`                        | Structured key–value pairs added per call site    |
+
 
 Example Alloy / Promtail pipeline (no transformation stage needed — levels are already lowercase):
 

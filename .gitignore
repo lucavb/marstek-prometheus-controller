@@ -5,3 +5,6 @@ coverage.out
 /marstek-controller
 __pycache__/
 *.pyc
+
+*.xapk
+*.apk
