@@ -77,6 +77,7 @@ type Config struct {
 	NearFullIdleEnterPercent       int // SoC >= this for N cycles enters idle
 	NearFullIdleExitPercent        int // SoC < this for N cycles exits idle (must be < NearFullIdleEnterPercent)
 	NearFullIdleConsecutiveSamples int // N consecutive samples for debounced entry and exit
+	NearFullIdleEntryExportWatts   int // smoothed export must be at least this large to enter idle
 
 	// Sustained-grid-import exit path out of near-full idle. The SoC-based
 	// exit alone deadlocks when the slot is disabled: with no discharge, SoC
@@ -121,7 +122,7 @@ func Load() (Config, error) {
 
 		PrometheusBaseURL:    getEnv("PROMETHEUS_BASE_URL", ""),
 		PrometheusQuery:      getEnv("PROMETHEUS_GRID_POWER_QUERY", "electricity_power_watts"),
-		PrometheusTimeout:    getEnvDuration("PROMETHEUS_TIMEOUT", 5*time.Second),
+		PrometheusTimeout:    getEnvDuration("PROMETHEUS_TIMEOUT", 12*time.Second),
 		PrometheusStaleAfter: getEnvDuration("PROMETHEUS_STALE_AFTER", 60*time.Second),
 
 		MQTTBrokerURL:           getEnv("MQTT_BROKER_URL", ""),
@@ -160,6 +161,7 @@ func Load() (Config, error) {
 		NearFullIdleEnterPercent:       getEnvInt("NEAR_FULL_IDLE_ENTER_PERCENT", 98),
 		NearFullIdleExitPercent:        getEnvInt("NEAR_FULL_IDLE_EXIT_PERCENT", 95),
 		NearFullIdleConsecutiveSamples: getEnvInt("NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES", 2),
+		NearFullIdleEntryExportWatts:   getEnvInt("NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS", 25),
 
 		NearFullIdleGridImportExitWatts:   getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS", 50),
 		NearFullIdleGridImportExitSamples: getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", 8),
@@ -269,6 +271,9 @@ func (c *Config) validate() error {
 	}
 	if c.NearFullIdleConsecutiveSamples < 1 {
 		errs = append(errs, "NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES must be >= 1")
+	}
+	if c.NearFullIdleEntryExportWatts < 0 {
+		errs = append(errs, "NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS must be >= 0")
 	}
 	if c.NearFullIdleGridImportExitWatts < 0 {
 		errs = append(errs, "NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS must be >= 0")

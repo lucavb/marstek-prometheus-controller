@@ -134,6 +134,7 @@ func run() error {
 		NearFullIdleEnterPercent:       cfg.NearFullIdleEnterPercent,
 		NearFullIdleExitPercent:        cfg.NearFullIdleExitPercent,
 		NearFullIdleConsecutiveSamples: cfg.NearFullIdleConsecutiveSamples,
+		NearFullIdleEntryExportWatts:   cfg.NearFullIdleEntryExportWatts,
 
 		NearFullIdleGridImportExitWatts:   cfg.NearFullIdleGridImportExitWatts,
 		NearFullIdleGridImportExitSamples: cfg.NearFullIdleGridImportExitSamples,

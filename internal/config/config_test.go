@@ -4,6 +4,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lucavb/marstek-prometheus-controller/internal/config"
 )
@@ -235,6 +236,46 @@ func TestLoad_MinCommandDeltaMalformed_FallsBackToDefault(t *testing.T) {
 	if cfg.MinCommandDeltaWattsExporting != 5 {
 		t.Errorf("MinCommandDeltaWattsExporting = %d, want fallback 5", cfg.MinCommandDeltaWattsExporting)
 	}
+}
+
+func TestLoad_StabilityDefaults(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.PrometheusTimeout != 12*time.Second {
+		t.Errorf("PrometheusTimeout default = %v, want 12s", cfg.PrometheusTimeout)
+	}
+	if cfg.NearFullIdleEntryExportWatts != 25 {
+		t.Errorf("NearFullIdleEntryExportWatts default = %d, want 25", cfg.NearFullIdleEntryExportWatts)
+	}
+}
+
+func TestLoad_NearFullIdleEntryExportWatts(t *testing.T) {
+	t.Run("override", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS", "40")
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load() unexpected error: %v", err)
+		}
+		if cfg.NearFullIdleEntryExportWatts != 40 {
+			t.Errorf("NearFullIdleEntryExportWatts = %d, want 40", cfg.NearFullIdleEntryExportWatts)
+		}
+	})
+
+	t.Run("negative", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS", "-1")
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() expected error for negative entry export threshold, got nil")
+		}
+		if !strings.Contains(err.Error(), "NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS must be >= 0") {
+			t.Errorf("error = %q, want NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS validation", err.Error())
+		}
+	})
 }
 
 func TestLoad_PassthroughRecoveryDefaults(t *testing.T) {

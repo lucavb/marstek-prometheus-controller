@@ -92,14 +92,15 @@ engage. (In practice the two ranges don't overlap, but the precedence is
 explicit.)
 
 **Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `98`)
-**and** smoothed grid ≤ 0 (balanced or exporting) for
+**and** smoothed grid export at or beyond
+`NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS` (default `25`) for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) consecutive control cycles.
 The grid-surplus gate is what prevents the post-`grid_import`-exit flap: on
 the LFP 100% plateau SoC does not drop for many minutes after a secondary
 exit, so a SoC-only entry counter would re-arm in two cycles and put idle
-back on while the grid was still importing. Requiring smoothed ≤ 0 means
-"we actually have surplus to feed back"; any positive smoothed reading
-resets the entry counter.
+back on while the grid was still importing. Requiring meaningful export means
+"we actually have surplus to feed back"; tiny meter noise around zero resets
+the entry counter instead of disabling discharge.
 
 **Exit (debounced):** `SoC < NEAR_FULL_IDLE_EXIT_PERCENT` (default `95`) for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive control cycles. Normal
@@ -165,7 +166,7 @@ All settings are environment variables:
 | ------------------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PROMETHEUS_BASE_URL`                | *required*                 | Prometheus base URL, e.g. `http://prometheus:9090`                                                                                                                                                                                                                |
 | `PROMETHEUS_GRID_POWER_QUERY`        | `electricity_power_watts`  | PromQL expression returning grid power in watts                                                                                                                                                                                                                   |
-| `PROMETHEUS_TIMEOUT`                 | `5s`                       | HTTP timeout for Prometheus queries                                                                                                                                                                                                                               |
+| `PROMETHEUS_TIMEOUT`                 | `12s`                      | HTTP timeout for Prometheus queries. Keep this below `CONTROL_INTERVAL`; the default allows observed home-cluster Prometheus tail latency without turning slow queries into false fallback events.                                                                 |
 | `PROMETHEUS_STALE_AFTER`             | `60s`                      | Reject samples older than this                                                                                                                                                                                                                                    |
 | `MQTT_BROKER_URL`                    | *required*                 | MQTT broker URL, e.g. `tcp://10.1.1.5:1883`                                                                                                                                                                                                                       |
 | `MQTT_USERNAME`                      | ``                         | Optional broker username                                                                                                                                                                                                                                          |
@@ -202,6 +203,7 @@ All settings are environment variables:
 | `NEAR_FULL_IDLE_ENTER_PERCENT`       | `98`                       | SoC threshold to enter idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples at or above it. Must satisfy `0 ≤ EXIT_PERCENT < ENTER_PERCENT ≤ 100`.                                                                                                 |
 | `NEAR_FULL_IDLE_EXIT_PERCENT`        | `95`                       | SoC threshold to exit idle after `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive samples strictly below it. The 3-point hysteresis band rides through LFP top-end SoC flicker.                                                                                   |
 | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` | `2`                        | Debounce length (in control cycles) for both idle entry and exit. Must be ≥ 1. Surplus-feed-in flipping off bypasses this debounce and exits immediately.                                                                                                         |
+| `NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS`  | `25`                       | Smoothed-grid export threshold (W) required to count an idle-entry sample. This prevents tiny export/noise around zero from disabling discharge; set to `0` to restore the older balanced-or-exporting entry gate. Must be ≥ 0.                                    |
 | `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS` | `50`                    | Smoothed-grid import threshold (W) above which an "import sample" is counted while idle is active. Should mirror `IMPORT_BIAS_WATTS` — setting it lower can cause flapping because normal control would not command a discharge on exit. Must be ≥ 0.              |
 | `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` | `8`                  | Consecutive high-import samples required to exit idle via the grid-import path (≈ 2 min at the 15 s control interval). Set to `0` to disable this exit path entirely (SoC-only behaviour). Must be ≥ 0.                                                            |
 | `PASSTHROUGH_STALL_DETECT_CYCLES`    | `5`                        | Consecutive cycles of full-SOC firmware pass-through, sustained grid import, commanded non-zero discharge, and `g1+g2=0` before a pass-through stall is recorded. Set to `0` to disable detection.                                                                |

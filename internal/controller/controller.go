@@ -75,6 +75,9 @@ type Config struct {
 	NearFullIdleEnterPercent       int
 	NearFullIdleExitPercent        int
 	NearFullIdleConsecutiveSamples int
+	// NearFullIdleEntryExportWatts is the minimum smoothed export required to
+	// enter idle; it keeps meter noise around zero from disabling discharge.
+	NearFullIdleEntryExportWatts int
 
 	// Secondary exit out of near-full idle based on sustained grid import.
 	// The SoC-based exit alone deadlocks at full charge when no discharge is

@@ -1530,9 +1530,10 @@ func nearFullIdleCfg(ctrl, start, end string) controller.Config {
 	cfg.NearFullIdleEnterPercent = 98
 	cfg.NearFullIdleExitPercent = 95
 	cfg.NearFullIdleConsecutiveSamples = 2
+	cfg.NearFullIdleEntryExportWatts = 25
 	// Mirror production defaults. Tests that want to exercise the grid-import
-	// exit set these explicitly; the idle-entry gate requires smoothed <= 0,
-	// so activation loops in these tests feed grid=0 W to satisfy it.
+	// exit set these explicitly; the idle-entry gate requires meaningful
+	// export, so activation loops in these tests feed -50 W to satisfy it.
 	cfg.NearFullIdleGridImportExitWatts = 50
 	cfg.NearFullIdleGridImportExitSamples = 8
 	return cfg
@@ -1550,9 +1551,9 @@ func TestStep_NearFullIdle_EntryDebounced(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	// Step 1: SoC=98, single sample. Must not disable yet — normal control runs.
-	// Grid=0 W satisfies the smoothed<=0 entry gate; g1+g2=123+123=246 → the
+	// Grid=-50 W satisfies the meaningful-export entry gate; g1+g2=123+123=246 → the
 	// bias path still produces a positive rawTarget and the slot stays enabled.
-	p.set(0, 0)
+	p.set(-50, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last1 := pub.last()
@@ -1560,8 +1561,8 @@ func TestStep_NearFullIdle_EntryDebounced(t *testing.T) {
 		t.Errorf("idle must not activate on first sample; got disabled slot %q", last1)
 	}
 
-	// Step 2: second consecutive SoC=98 sample at grid=0 → idle engages.
-	p.set(0, 0)
+	// Step 2: second consecutive SoC=98 sample at export=-50 → idle engages.
+	p.set(-50, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	last2 := pub.last()
@@ -1585,9 +1586,9 @@ func TestStep_NearFullIdle_StayThroughSoCFlicker(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate: two SoC=98 samples at grid=0 (entry gate requires smoothed<=0).
+	// Activate: two SoC=98 samples at export=-50 (entry gate requires meaningful export).
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1625,9 +1626,9 @@ func TestStep_NearFullIdle_ExitDebounced(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate at grid=0 (entry gate requires smoothed<=0).
+	// Activate at export=-50 (entry gate requires meaningful export).
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1673,11 +1674,11 @@ func TestStep_NearFullIdle_DoesNotDischargeOnGridImport(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle at grid=0 (entry gate requires smoothed<=0). Use g1=g2=123
+	// Activate idle at export=-50 (entry gate requires meaningful export). Use g1=g2=123
 	// on activation so we have a non-zero lastCommandWatts for commandIdle to
 	// actually publish the a1=0 disable.
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1716,9 +1717,9 @@ func TestStep_NearFullIdle_ExitsOnSustainedGridImport(t *testing.T) {
 	cfg.NearFullIdleGridImportExitWatts = 50
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle at SoC=98 with surplus grid (=0, satisfies entry gate).
+	// Activate idle at SoC=98 with meaningful export.
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1772,9 +1773,9 @@ func TestStep_NearFullIdle_TransientImportDoesNotExit(t *testing.T) {
 	cfg.NearFullIdleGridImportExitWatts = 50
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle at grid=0 (entry gate requires smoothed<=0).
+	// Activate idle at export=-50 (entry gate requires meaningful export).
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1833,9 +1834,9 @@ func TestStep_NearFullIdle_GridImportExitDisabledByZeroSamples(t *testing.T) {
 	cfg.NearFullIdleGridImportExitWatts = 50
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle at grid=0 (entry gate requires smoothed<=0).
+	// Activate idle at export=-50 (entry gate requires meaningful export).
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1907,9 +1908,9 @@ func TestStep_NearFullIdle_FallbackClearsState(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle at grid=0 (entry gate requires smoothed<=0).
+	// Activate idle at export=-50 (entry gate requires meaningful export).
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -1924,9 +1925,9 @@ func TestStep_NearFullIdle_FallbackClearsState(t *testing.T) {
 	_ = c.Step(context.Background())
 
 	// Recovery sample 1: fresh post-fallback — debounce must not be carried
-	// over, so idle must NOT instantly re-engage. Grid=0 keeps the entry gate
+	// over, so idle must NOT instantly re-engage. Export keeps the entry gate
 	// open so this test isolates the debounce reset rather than the gate.
-	p.set(0, 0)
+	p.set(-50, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	countBefore := pub.count()
 	_ = c.Step(context.Background())
@@ -1940,7 +1941,7 @@ func TestStep_NearFullIdle_FallbackClearsState(t *testing.T) {
 	}
 
 	// Recovery sample 2: debounce complete → idle engages again.
-	p.set(0, 0)
+	p.set(-50, 0)
 	st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 	_ = c.Step(context.Background())
 	if !strings.Contains(pub.last(), ",a1=0,") {
@@ -1995,9 +1996,9 @@ func TestStep_NearFullIdle_RequiresSurplusFeedIn(t *testing.T) {
 		t.Errorf("idle must not engage while SurplusFeedIn=false; got %q", last)
 	}
 
-	// Flip SurplusFeedIn to true with grid=0 so the entry gate passes. Debounce
+	// Flip SurplusFeedIn to true with export=-50 so the entry gate passes. Debounce
 	// still applies, so the first sample must not activate on its own.
-	p.set(0, 0)
+	p.set(-50, 0)
 	st.setFresh(devStatusAtSoC(100, 50, 50, 80, 80))
 	_ = c.Step(context.Background())
 	if strings.Contains(pub.last(), ",a1=0,") && strings.Contains(pub.last(), ",v1=0,") {
@@ -2008,7 +2009,7 @@ func TestStep_NearFullIdle_RequiresSurplusFeedIn(t *testing.T) {
 	}
 
 	// Second sample after flip → idle engages.
-	p.set(0, 0)
+	p.set(-50, 0)
 	st.setFresh(devStatusAtSoC(100, 50, 50, 80, 80))
 	_ = c.Step(context.Background())
 	if !strings.Contains(pub.last(), ",a1=0,") {
@@ -2028,9 +2029,9 @@ func TestStep_NearFullIdle_SurplusFeedInFlipExitsIdle(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle with SurplusFeedIn=true at grid=0 (entry gate).
+	// Activate idle with SurplusFeedIn=true at export=-50 (entry gate).
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(98, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2076,6 +2077,40 @@ func TestStep_NearFullIdle_DoesNotEnterWhileImporting(t *testing.T) {
 	}
 }
 
+// TestStep_NearFullIdle_DoesNotEnterOnTinyExport verifies that meter noise
+// around zero does not disable discharge at the top of charge. The controller
+// should only enter near-full idle when there is meaningful export to carry
+// through via the firmware surplus-feed-in path.
+func TestStep_NearFullIdle_DoesNotEnterOnTinyExport(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < 10; i++ {
+		p.set(-2, 0)
+		st.setFresh(devStatusAtSoC(100, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+		last := pub.last()
+		if strings.Contains(last, ",a1=0,") && strings.Contains(last, ",v1=0,") {
+			t.Fatalf("cycle %d: tiny export must not enter near-full idle; got %q", i, last)
+		}
+	}
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(-50, 0)
+		st.setFresh(devStatusAtSoC(100, 50, 50, 123, 123))
+		_ = c.Step(context.Background())
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Fatalf("meaningful export should still enter near-full idle; got %q", last)
+	}
+}
+
 // TestStep_NearFullIdle_NoFlapAfterGridImportExit reproduces the 2026-04
 // incident: idle activates, a sustained grid import trips the grid_import
 // exit, and normal control then settles at a small positive grid import
@@ -2095,9 +2130,9 @@ func TestStep_NearFullIdle_NoFlapAfterGridImportExit(t *testing.T) {
 	cfg.NearFullIdleGridImportExitWatts = 50
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Activate idle at SoC=100, grid=0.
+	// Activate idle at SoC=100 with meaningful export.
 	for i := 0; i < 2; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoC(100, 50, 50, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2141,7 +2176,7 @@ func TestStep_NearFullIdle_EntersAtFullWithSolarSurplus(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2165,7 +2200,7 @@ func TestStep_NearFullIdle_StaysInPassthroughWhenSolarCoversLoad(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2197,7 +2232,7 @@ func TestStep_NearFullIdle_DoesNotGridImportExitWhileFirmwarePassthroughActive(t
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2230,7 +2265,7 @@ func TestStep_PassthroughRecovery_DisabledObserveOnly(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2258,7 +2293,7 @@ func TestStep_PassthroughRecovery_BlockedWithoutFlashGuard(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2286,7 +2321,7 @@ func TestStep_PassthroughRecovery_DisablesSurplusFeedInOnce(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2314,7 +2349,7 @@ func TestStep_PassthroughRecovery_NormalControlRunsAfterDisable(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2350,7 +2385,7 @@ func TestStep_PassthroughRecovery_RestoresWhenBatteryLeavesFullPlateau(t *testin
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2383,7 +2418,7 @@ func TestStep_PassthroughRecovery_RateLimitsRepeatedEvents(t *testing.T) {
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
@@ -2395,7 +2430,7 @@ func TestStep_PassthroughRecovery_RateLimitsRepeatedEvents(t *testing.T) {
 	_ = c.Step(context.Background())
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
-		p.set(0, 0)
+		p.set(-50, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
