@@ -223,7 +223,10 @@ func (c *Controller) Step(ctx context.Context) error {
 	// fires when solar drops below house load. When smoothed grid import
 	// exceeds NearFullIdleGridImportExitWatts for
 	// NearFullIdleGridImportExitSamples consecutive cycles, idle exits and
-	// normal control resumes — the battery immediately begins covering load.
+	// normal control resumes. This exit remains enabled even when firmware
+	// pass-through is active: pass-through stall handling can still observe or
+	// recover an ignored discharge command, but it must not keep intentional
+	// idle active during sustained grid import.
 	//
 	// Entry is gated on meaningful export in addition to SoC, so after a
 	// grid_import exit the enter counter cannot re-arm while the grid is still
@@ -289,7 +292,7 @@ func (c *Controller) Step(ctx context.Context) error {
 			} else {
 				c.nearFullIdleExitSamples = 0
 			}
-			gridExitEnabled := c.cfg.NearFullIdleGridImportExitSamples > 0 && !passThroughActive
+			gridExitEnabled := c.cfg.NearFullIdleGridImportExitSamples > 0
 			if gridExitEnabled && smoothed > float64(c.cfg.NearFullIdleGridImportExitWatts) {
 				c.nearFullIdleGridImportSamples++
 			} else {

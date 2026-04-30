@@ -2220,7 +2220,7 @@ func TestStep_NearFullIdle_StaysInPassthroughWhenSolarCoversLoad(t *testing.T) {
 	}
 }
 
-func TestStep_NearFullIdle_DoesNotGridImportExitWhileFirmwarePassthroughActive(t *testing.T) {
+func TestStep_NearFullIdle_GridImportExitWorksDuringFirmwarePassthrough(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
@@ -2228,7 +2228,7 @@ func TestStep_NearFullIdle_DoesNotGridImportExitWhileFirmwarePassthroughActive(t
 
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	cfg.NearFullIdleGridImportExitSamples = 3
-	cfg.PassthroughStallDetectCycles = 5
+	cfg.PassthroughStallDetectCycles = 0
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
@@ -2238,18 +2238,21 @@ func TestStep_NearFullIdle_DoesNotGridImportExitWhileFirmwarePassthroughActive(t
 	}
 	countAfterEntry := pub.count()
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < cfg.NearFullIdleGridImportExitSamples; i++ {
 		p.set(150, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
 		_ = c.Step(context.Background())
-		last := pub.last()
-		if strings.Contains(last, ",a1=1,") && !strings.Contains(last, "cd=31") {
-			t.Fatalf("cycle %d: grid_import exit must not publish futile timed-discharge write during pass-through; got %q", i, last)
-		}
 	}
 
-	if pub.count() != countAfterEntry {
-		t.Fatalf("pass-through grid import should not publish timed-discharge chatter; got %d publishes, want %d", pub.count(), countAfterEntry)
+	last := pub.last()
+	if pub.count() <= countAfterEntry {
+		t.Fatalf("sustained import during pass-through should publish a discharge command; got %d publishes, want more than %d", pub.count(), countAfterEntry)
+	}
+	if !strings.Contains(last, ",a1=1,") || !strings.Contains(last, ",v1=150,") {
+		t.Fatalf("grid_import exit must re-enable the slot during pass-through; got %q", last)
+	}
+	if pub.countContaining("cd=31") != 0 {
+		t.Fatalf("grid_import exit should not require flash recovery writes; payloads with cd=31 = %d", pub.countContaining("cd=31"))
 	}
 }
 
