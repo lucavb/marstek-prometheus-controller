@@ -145,11 +145,21 @@ func freshDevStatus() marstek.Status {
 	s := marstek.ParseStatus(
 		"p1=1,p2=1,w1=375,w2=380,pe=51,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=90," +
 			"lv=240,cj=0,kn=1142,g1=0,g2=0,b1=0,b2=0,md=0," +
-			"d1=1,e1=0:0,f1=23:59,h1=240,d2=0,e2=0:0,f2=23:59,h2=80," +
+			"d1=0,e1=0:0,f1=23:59,h1=240,d2=0,e2=0:0,f2=23:59,h2=80," +
 			"d3=0,e3=0:0,f3=23:59,h3=80,d4=0,e4=0:0,f4=23:59,h4=80," +
 			"d5=0,e5=0:0,f5=23:59,h5=80,lmo=2045,lmi=1483,lmf=0,uv=107,sm=0,bn=0,ct_t=7,tc_dis=1",
 	)
 	return s
+}
+
+func withControlledSlot(status marstek.Status, enabled bool, watts int) marstek.Status {
+	status.Slots[0] = marstek.ReadSlot{
+		Enabled: enabled,
+		Start:   "0:0",
+		End:     "23:59",
+		Watts:   watts,
+	}
+	return status
 }
 
 func defaultCfg(ctrl, start, end string) controller.Config {
@@ -281,7 +291,7 @@ func TestStep_MinCommandDelta_Suppresses(t *testing.T) {
 
 	// Second step: 210 W (delta=10 < 50) → suppressed
 	p.set(210, 0)
-	st.setFresh(freshDevStatus())
+	st.setFresh(withControlledSlot(freshDevStatus(), true, 200))
 	beforeCount := pub.count()
 	_ = c.Step(context.Background())
 
@@ -307,7 +317,7 @@ func TestStep_MinHoldTime_Suppresses(t *testing.T) {
 	// Advance only 10 seconds — within hold time
 	clk.advance(10 * time.Second)
 	p.set(400, 0)
-	st.setFresh(freshDevStatus())
+	st.setFresh(withControlledSlot(freshDevStatus(), true, 200))
 	beforeCount := pub.count()
 	_ = c.Step(context.Background())
 
@@ -650,7 +660,7 @@ func TestStep_HoldTime_StillSuppresses_WhenNotExporting(t *testing.T) {
 	// We try to reduce to 200 W — hold-time must still suppress.
 	clk.advance(5 * time.Second)
 	p.set(200, 0)
-	st.setFresh(freshDevStatus())
+	st.setFresh(withControlledSlot(freshDevStatus(), true, 500))
 	countBefore := pub.count()
 	_ = c.Step(context.Background())
 
@@ -1013,7 +1023,7 @@ func TestStep_SoCFloor_Hysteresis_StaysAtZero(t *testing.T) {
 
 	// SoC recovers to 24 — above floor but below resume (27) → must stay suppressed.
 	p.set(200, 0)
-	st.setFresh(devStatusWithSoC(24, 80))
+	st.setFresh(withControlledSlot(devStatusWithSoC(24, 80), false, 0))
 	countBefore := pub.count()
 	if err := c.Step(context.Background()); err != nil {
 		t.Fatalf("Step error = %v", err)
@@ -1220,6 +1230,187 @@ func TestStep_DeviceStatusLogged_WhenSoCFloorActive(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "device status received") {
 		t.Errorf("expected 'device status received' log on first valid status even when SoC floor suppresses discharge\nlog output:\n%s", buf.String())
+	}
+}
+
+func TestStep_ControllerAuthority_RemediatesChargingMode(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	p.set(0, 0)
+	status := freshDevStatus()
+	status.ChargingMode = 1
+	st.setFresh(status)
+
+	cfg := defaultCfg("ctrl/topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if got := pub.last(); got != "cd=17,md=0" {
+		t.Fatalf("expected charging-mode remediation payload, got %q", got)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("expected exactly one publish, got %d", pub.count())
+	}
+	if !c.Ready() {
+		t.Error("controller should be ready after remediation")
+	}
+
+	clk.advance(cfg.ControlInterval)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() error = %v", err)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("expected remediation not to replay before status echo, got %d publishes", pub.count())
+	}
+}
+
+func TestStep_ControllerAuthority_ReissuesChargingModeAfterRuntimeDrift(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	p.set(0, 0)
+	cfg := defaultCfg("ctrl/topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	drifted := freshDevStatus()
+	drifted.ChargingMode = 1
+	st.setFresh(drifted)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() error = %v", err)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("expected first remediation publish, got %d", pub.count())
+	}
+
+	clk.advance(cfg.ControlInterval)
+	corrected := freshDevStatus()
+	st.setFresh(corrected)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() error = %v", err)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("expected no publish after status corrected, got %d", pub.count())
+	}
+
+	clk.advance(cfg.ControlInterval)
+	st.setFresh(drifted)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("third Step() error = %v", err)
+	}
+	if pub.count() != 2 {
+		t.Fatalf("expected remediation to be reissued after drift returned, got %d publishes", pub.count())
+	}
+	if got := pub.last(); got != "cd=17,md=0" {
+		t.Fatalf("expected charging-mode remediation payload on reissue, got %q", got)
+	}
+}
+
+func TestStep_ControllerAuthority_RemediatesOutputPorts(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	p.set(0, 0)
+	status := freshDevStatus()
+	status.Output1Enabled = 0
+	status.Output2Enabled = 0
+	st.setFresh(status)
+
+	cfg := defaultCfg("ctrl/topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if got := pub.last(); got != "cd=18,md=3" {
+		t.Fatalf("expected output-enable remediation payload, got %q", got)
+	}
+}
+
+func TestStep_ControllerAuthority_ReassertsControlledSlotWhenDrifted(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	p.set(200, 0)
+	cfg := defaultCfg("ctrl/topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	st.setFresh(freshDevStatus())
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() error = %v", err)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("expected initial schedule publish, got %d", pub.count())
+	}
+
+	drifted := freshDevStatus()
+	drifted.Slots[0] = marstek.ReadSlot{
+		Enabled: false,
+		Start:   "0:0",
+		End:     "23:59",
+		Watts:   200,
+	}
+	st.setFresh(drifted)
+	clk.advance(cfg.ControlInterval)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() error = %v", err)
+	}
+	if pub.count() != 2 {
+		t.Fatalf("expected controlled-slot reassert publish, got %d", pub.count())
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=1,") || !strings.Contains(last, ",v1=200,") {
+		t.Fatalf("expected controlled slot to be re-enabled at 200 W, got %q", last)
+	}
+
+	clk.advance(cfg.ControlInterval)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("third Step() error = %v", err)
+	}
+	if pub.count() != 2 {
+		t.Fatalf("expected no duplicate slot reassert before status echo, got %d publishes", pub.count())
+	}
+}
+
+func TestStep_ControllerAuthority_IdleReassertsZeroSlotWhenLastCommandZero(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	p.set(0, 0)
+	status := freshDevStatus()
+	status.SOCPercent = 5
+	status.Slots[0] = marstek.ReadSlot{
+		Enabled: true,
+		Start:   "0:0",
+		End:     "23:59",
+		Watts:   240,
+	}
+	st.setFresh(status)
+
+	cfg := defaultCfg("ctrl/topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("expected idle slot reset publish, got %d", pub.count())
+	}
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Fatalf("expected idle remediation to disable slot 1, got %q", last)
 	}
 }
 
@@ -1451,7 +1642,7 @@ func TestStep_MinCommandDelta_Asymmetric(t *testing.T) {
 
 			// Test step.
 			p.set(tc.testGrid, 0)
-			st.setFresh(devStatusWithOutput(tc.testG1, tc.testG2))
+			st.setFresh(withControlledSlot(devStatusWithOutput(tc.testG1, tc.testG2), tc.warmupGrid > 0, int(tc.warmupGrid)))
 			before := pub.count()
 			if err := c.Step(context.Background()); err != nil {
 				t.Fatalf("test Step() error = %v", err)
@@ -1466,7 +1657,7 @@ func TestStep_MinCommandDelta_Asymmetric(t *testing.T) {
 			// For no-op cases, verify a repeat step also doesn't publish.
 			if tc.assertStillSuppressedOnRepeat {
 				before2 := pub.count()
-				st.setFresh(devStatusWithOutput(tc.testG1, tc.testG2))
+				st.setFresh(withControlledSlot(devStatusWithOutput(tc.testG1, tc.testG2), tc.warmupGrid > 0, int(tc.warmupGrid)))
 				_ = c.Step(context.Background())
 				if pub.count() != before2 {
 					t.Errorf("repeat step published unexpectedly (count %d→%d); delta=0 should always suppress",
@@ -2208,7 +2399,7 @@ func TestStep_NearFullIdle_StaysInPassthroughWhenSolarCoversLoad(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		p.set(-20, 0)
-		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
+		st.setFresh(withControlledSlot(devStatusAtSoCPassThrough(100, 300, 300, 0, 0), false, 0))
 		_ = c.Step(context.Background())
 	}
 
@@ -2493,7 +2684,7 @@ func TestStep_TransientZeroOutput_HoldsOneCycle(t *testing.T) {
 	cfg := defaultCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Step 1: establish 200 W discharge (g1=100, g2=100).
+	// Step 1: establish 400 W command (currentOutput=200 plus 200 W import).
 	p.set(200, 0)
 	st.setFresh(devStatusWithOutputAndSolar(100, 100, 375, 380))
 	_ = c.Step(context.Background())
@@ -2504,7 +2695,7 @@ func TestStep_TransientZeroOutput_HoldsOneCycle(t *testing.T) {
 
 	// Step 2: g1=g2=0 transient blip — must suppress and NOT publish.
 	p.set(200, 0)
-	st.setFresh(devStatusWithOutputAndSolar(0, 0, 375, 380))
+	st.setFresh(withControlledSlot(devStatusWithOutputAndSolar(0, 0, 375, 380), true, 400))
 	_ = c.Step(context.Background())
 	if pub.count() != countAfter1 {
 		t.Errorf("transient zero: expected no publish on blip cycle, count changed %d→%d", countAfter1, pub.count())
@@ -2532,7 +2723,7 @@ func TestStep_TransientZeroOutput_DoesNotHold_TwoInARow(t *testing.T) {
 	cfg := defaultCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Step 1: establish discharge.
+	// Step 1: establish a 400 W command.
 	p.set(200, 0)
 	st.setFresh(devStatusWithOutputAndSolar(100, 100, 375, 380))
 	_ = c.Step(context.Background())
@@ -2540,7 +2731,7 @@ func TestStep_TransientZeroOutput_DoesNotHold_TwoInARow(t *testing.T) {
 
 	// Step 2: first zero — suppressed.
 	p.set(200, 0)
-	st.setFresh(devStatusWithOutputAndSolar(0, 0, 375, 380))
+	st.setFresh(withControlledSlot(devStatusWithOutputAndSolar(0, 0, 375, 380), true, 400))
 	_ = c.Step(context.Background())
 	if pub.count() != countAfter1 {
 		t.Fatal("precondition: first zero cycle must be suppressed")

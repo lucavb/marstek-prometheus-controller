@@ -196,8 +196,10 @@ what the device and the companion exporter expect.
 foot-gun guard. Flash is finite; this gate is intentional.
 - 🚫 Never raise `MaxOutputWatts` above 800. The device caps at 800 W; higher
 values do nothing except confuse the operator.
-- 🚫 Never make the controller modify charging mode (`cs=`) automatically.
-Log a warning if `cs=1` is detected; let the user fix it in the app.
+- ✅ The controller may remediate charging mode (`cd=17`) automatically while
+  it is running so the battery stays in simultaneous charge+discharge mode.
+  Keep that behavior narrowly scoped to enforcing the controller-owned runtime
+  state; do not broaden it into arbitrary app-setting management.
 - 🚫 Never commit secrets, `.env` files, MQTT credentials, or device IDs.
 `MARSTEK_DEVICE_ID` in examples must stay as the placeholder
 `60323bd14b6e`.

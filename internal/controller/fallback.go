@@ -20,10 +20,6 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	}
 	c.resetPassthroughStall()
 
-	if c.lastCommandWatts == 0 {
-		return nil
-	}
-
 	// Prefer the last known device status so the other four schedule slots are
 	// preserved. Fall back to a zero status only if we have never successfully
 	// read one — in that edge case, we have nothing to preserve anyway.
@@ -36,6 +32,7 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	if idx < 0 || idx > 4 {
 		idx = 0
 	}
+	current := slots[idx]
 	// Disable the slot rather than sending Watts=0: the device silently clamps
 	// v=0 to 80W on an enabled slot, so Enabled=false is the only real stop.
 	slots[idx] = marstek.Slot{
@@ -43,6 +40,10 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 		Start:   c.cfg.ScheduleStart,
 		End:     c.cfg.ScheduleEnd,
 		Watts:   0,
+	}
+	if current == slots[idx] {
+		c.lastCommandWatts = 0
+		return nil
 	}
 
 	payload := marstek.BuildTimedDischargePayload(slots, false)
@@ -57,6 +58,9 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	slog.Warn("fallback: commanded zero discharge", "reason", reason)
 	c.lastCommandWatts = 0
 	c.lastCommandTime = c.clock.Now()
+	c.authorityPendingPayload = payload
+	c.authorityPendingSince = c.lastCommandTime
+	c.authorityPendingSeenAt = time.Time{}
 	if c.m != nil {
 		c.m.CommandedSlotPowerWatts.Set(0)
 		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
@@ -72,44 +76,29 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 // with the caller-supplied reason rather than FallbackTotal, and always
 // preserves the other four slots from the freshly-read devStatus (not the
 // cached lastStatus).
-func (c *Controller) commandIdle(ctx context.Context, now time.Time, devStatus marstek.Status, reason string) error {
+func (c *Controller) commandIdle(ctx context.Context, now, observedAt time.Time, devStatus marstek.Status, reason string) error {
 	if c.m != nil {
 		c.m.CommandSuppressedTotal.WithLabelValues(reason).Inc()
 		c.m.SetState(metrics.StateIdle)
 	}
 
-	if c.lastCommandWatts == 0 {
-		return nil
-	}
-
-	slots := marstek.SlotsAsWriteSlots(devStatus)
-	idx := c.cfg.ScheduleSlot - 1
-	slots[idx] = marstek.Slot{
-		Enabled: false,
-		Start:   c.cfg.ScheduleStart,
-		End:     c.cfg.ScheduleEnd,
-		Watts:   0,
-	}
-
-	payload := marstek.BuildTimedDischargePayload(slots, false)
-	if err := c.pub.Publish(c.cfg.ControlTopic, payload); err != nil {
-		slog.Warn("commandIdle publish failed", "err", err, "reason", reason)
-		if c.m != nil {
-			c.m.MQTTPublishErrorsTotal.WithLabelValues(classifyMQTTError(err)).Inc()
-		}
+	handled, published, err := c.ensureControlledSlot(now, observedAt, devStatus, 0, reason)
+	if err != nil {
 		return err
 	}
-
-	slog.Info("idle: disabled discharge slot",
-		"slot", c.cfg.ScheduleSlot,
-		"reason", reason,
-		"prev_watts", c.lastCommandWatts)
+	if handled {
+		c.lastCommandWatts = 0
+		if published {
+			c.lastCommandTime = now
+			if c.m != nil {
+				c.m.CommandedSlotPowerWatts.Set(0)
+			}
+		}
+		return nil
+	}
 	c.lastCommandWatts = 0
-	c.lastCommandTime = now
 	if c.m != nil {
 		c.m.CommandedSlotPowerWatts.Set(0)
-		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
-		c.m.RecordLastMQTTPublish(now)
 	}
 	return nil
 }

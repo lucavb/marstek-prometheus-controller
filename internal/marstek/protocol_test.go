@@ -38,6 +38,46 @@ func TestBuildSurplusFeedInPayload(t *testing.T) {
 	}
 }
 
+func TestBuildChargingModePayload(t *testing.T) {
+	tests := []struct {
+		name string
+		mode int
+		want string
+	}{
+		{name: "simultaneous", mode: 0, want: "cd=17,md=0"},
+		{name: "charge then discharge", mode: 1, want: "cd=17,md=1"},
+		{name: "non zero clamps to one", mode: 99, want: "cd=17,md=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := marstek.BuildChargingModePayload(tt.mode); got != tt.want {
+				t.Errorf("BuildChargingModePayload(%d) = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildOutputEnablePayload(t *testing.T) {
+	tests := []struct {
+		name          string
+		output1Enable bool
+		output2Enable bool
+		want          string
+	}{
+		{name: "both disabled", want: "cd=18,md=0"},
+		{name: "output one only", output1Enable: true, want: "cd=18,md=1"},
+		{name: "output two only", output2Enable: true, want: "cd=18,md=2"},
+		{name: "both enabled", output1Enable: true, output2Enable: true, want: "cd=18,md=3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := marstek.BuildOutputEnablePayload(tt.output1Enable, tt.output2Enable); got != tt.want {
+				t.Errorf("BuildOutputEnablePayload(%v, %v) = %q, want %q", tt.output1Enable, tt.output2Enable, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTopics(t *testing.T) {
 	ctrl := marstek.ControlTopic("HMJ-2", "60323bd14b6e")
 	want := "hame_energy/HMJ-2/App/60323bd14b6e/ctrl"

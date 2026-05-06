@@ -53,6 +53,14 @@ const CDRestart = 10
 // volatile counterpart for tc_dis/touchuan_disa.
 const CDSurplusFeedIn = 31
 
+// CDChargingMode is the command code for the battery charging mode setting.
+// md=0 selects simultaneous charge+discharge; md=1 selects charge-then-discharge.
+const CDChargingMode = 17
+
+// CDOutputEnable is the command code for the output-port enable bitmask.
+// md bit 0 controls output 1, bit 1 controls output 2.
+const CDOutputEnable = 18
+
 // RestartPayload is the MQTT payload that triggers a device software restart.
 const RestartPayload = "cd=10"
 
@@ -117,6 +125,30 @@ func BuildSurplusFeedInPayload(enable bool) string {
 		value = 0
 	}
 	return fmt.Sprintf("cd=%d,touchuan_disa=%d", CDSurplusFeedIn, value)
+}
+
+// BuildChargingModePayload builds the payload that sets the device charging
+// mode. mode=0 selects simultaneous charge+discharge; any other value selects
+// charge-then-discharge.
+func BuildChargingModePayload(mode int) string {
+	if mode != 0 {
+		mode = 1
+	}
+	return fmt.Sprintf("cd=%d,md=%d", CDChargingMode, mode)
+}
+
+// BuildOutputEnablePayload builds the payload that enables/disables the two AC
+// output ports. The device uses md as a 2-bit mask: bit 0 = output 1, bit 1 =
+// output 2.
+func BuildOutputEnablePayload(output1Enabled, output2Enabled bool) string {
+	mask := 0
+	if output1Enabled {
+		mask |= 1
+	}
+	if output2Enabled {
+		mask |= 2
+	}
+	return fmt.Sprintf("cd=%d,md=%d", CDOutputEnable, mask)
 }
 
 // Status holds the parsed fields from a device status payload (cd=1 response).

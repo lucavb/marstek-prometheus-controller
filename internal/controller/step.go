@@ -158,18 +158,20 @@ func (c *Controller) Step(ctx context.Context) error {
 			"charging_mode", devStatus.ChargingMode,
 			"o1", devStatus.Output1Enabled, "o2", devStatus.Output2Enabled,
 			"surplus_feed_in", devStatus.SurplusFeedIn)
-		if devStatus.ChargingMode != 0 {
-			slog.Warn("device is NOT in simultaneous charge+discharge mode (cs!=0); zero-export control may be ineffective")
-		}
-		if devStatus.Output1Enabled == 0 && devStatus.Output2Enabled == 0 {
-			slog.Warn("both output ports are disabled; discharge commands will produce 0 W until outputs are enabled")
-		}
 		if c.cfg.NearFullIdleEnabled && !devStatus.SurplusFeedIn {
 			slog.Warn("near-full idle is enabled but surplus feed-in is disabled in the app (tc_dis=1); idle will not engage until surplus feed-in is re-enabled, otherwise PV would be stranded at full SoC")
 		}
 		if c.cfg.PassthroughAutoRecovery && !devStatus.SurplusFeedIn && !c.surplusFeedInDisabledByController {
 			slog.Warn("pass-through auto-recovery is enabled but surplus feed-in is already disabled; controller will not restore a setting it did not change")
 		}
+	}
+
+	if handled, err := c.ensureDeviceConfig(now, statusReceivedAt, devStatus); err != nil {
+		return err
+	} else if handled {
+		c.ready = true
+		c.transientZeroFiredLastCycle = false
+		return nil
 	}
 
 	if c.m != nil {
@@ -191,7 +193,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.ready = true
 		c.transientZeroFiredLastCycle = false
 		c.resetPassthroughStall()
-		return c.commandIdle(ctx, now, devStatus, "soc_floor")
+		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "soc_floor")
 	}
 
 	// ── 2b. Smooth the grid power signal ─────────────────────────────────────
@@ -342,7 +344,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		}
 		c.ready = true
 		c.transientZeroFiredLastCycle = false
-		return c.commandIdle(ctx, now, devStatus, "near_full_idle")
+		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "near_full_idle")
 	}
 
 	// ── 2d. Transient-zero-output guard ──────────────────────────────────────
@@ -355,6 +357,20 @@ func (c *Controller) Step(ctx context.Context) error {
 	prevHadOutput := hasPrevStatus && (prevStatus.Output1Watts+prevStatus.Output2Watts) > 0
 	if currentZeroOutput && prevHadOutput && c.lastCommandWatts > c.cfg.MinOutputWatts &&
 		!c.transientZeroFiredLastCycle {
+		handled, published, err := c.ensureControlledSlot(now, statusReceivedAt, devStatus, c.lastCommandWatts, "transient_zero_output")
+		if err != nil {
+			return err
+		}
+		if published {
+			c.lastCommandTime = now
+			if c.m != nil {
+				c.m.CommandedSlotPowerWatts.Set(float64(c.lastCommandWatts))
+			}
+		}
+		if handled {
+			c.ready = true
+			return nil
+		}
 		c.transientZeroFiredLastCycle = true
 		if c.m != nil {
 			c.m.CommandSuppressedTotal.WithLabelValues("transient_zero_output").Inc()
@@ -435,6 +451,20 @@ func (c *Controller) Step(ctx context.Context) error {
 	}
 	delta := abs(ramped - c.lastCommandWatts)
 	if delta == 0 || delta < deltaThreshold {
+		handled, published, err := c.ensureControlledSlot(now, statusReceivedAt, devStatus, c.lastCommandWatts, "delta_suppressed")
+		if err != nil {
+			return err
+		}
+		if published {
+			c.lastCommandTime = now
+			if c.m != nil {
+				c.m.CommandedSlotPowerWatts.Set(float64(c.lastCommandWatts))
+			}
+		}
+		if handled {
+			c.ready = true
+			return nil
+		}
 		if c.m != nil {
 			c.m.CommandSuppressedTotal.WithLabelValues("delta").Inc()
 			c.updateState(smoothed)
@@ -449,6 +479,20 @@ func (c *Controller) Step(ctx context.Context) error {
 	holdTimeActive := !c.lastCommandTime.IsZero() && now.Sub(c.lastCommandTime) < c.cfg.MinHoldTime
 	fastPathBypass := exporting && ramped < c.lastCommandWatts
 	if holdTimeActive && !fastPathBypass {
+		handled, published, err := c.ensureControlledSlot(now, statusReceivedAt, devStatus, c.lastCommandWatts, "hold_time")
+		if err != nil {
+			return err
+		}
+		if published {
+			c.lastCommandTime = now
+			if c.m != nil {
+				c.m.CommandedSlotPowerWatts.Set(float64(c.lastCommandWatts))
+			}
+		}
+		if handled {
+			c.ready = true
+			return nil
+		}
 		if c.m != nil {
 			c.m.CommandSuppressedTotal.WithLabelValues("hold_time").Inc()
 			c.updateState(smoothed)
@@ -483,6 +527,9 @@ func (c *Controller) Step(ctx context.Context) error {
 
 	c.lastCommandWatts = ramped
 	c.lastCommandTime = now
+	c.authorityPendingPayload = payload
+	c.authorityPendingSince = now
+	c.authorityPendingSeenAt = statusReceivedAt
 	if c.m != nil {
 		c.m.CommandedSlotPowerWatts.Set(float64(ramped))
 		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()

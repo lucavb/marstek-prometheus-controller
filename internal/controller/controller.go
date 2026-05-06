@@ -109,13 +109,16 @@ type Controller struct {
 	m      *metrics.Metrics
 
 	// State
-	smoothed         float64
-	hasSmoothed      bool
-	lastCommandWatts int
-	lastCommandTime  time.Time
-	loggedFirmware   bool
-	ready            bool
-	lastStatusWarnAt time.Time
+	smoothed                float64
+	hasSmoothed             bool
+	lastCommandWatts        int
+	lastCommandTime         time.Time
+	loggedFirmware          bool
+	ready                   bool
+	lastStatusWarnAt        time.Time
+	authorityPendingPayload string
+	authorityPendingSince   time.Time
+	authorityPendingSeenAt  time.Time
 
 	// lastStatus caches the most recent successfully-read device status so that
 	// fallback() can preserve the user's other four schedule slots rather than
