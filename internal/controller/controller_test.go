@@ -1312,7 +1312,7 @@ func TestStep_ControllerAuthority_ReissuesChargingModeAfterRuntimeDrift(t *testi
 	}
 }
 
-func TestStep_ControllerAuthority_RemediatesOutputPorts(t *testing.T) {
+func TestStep_ControllerAuthority_DoesNotRemediateOutputPorts(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
@@ -1330,8 +1330,76 @@ func TestStep_ControllerAuthority_RemediatesOutputPorts(t *testing.T) {
 	if err := c.Step(context.Background()); err != nil {
 		t.Fatalf("Step() error = %v", err)
 	}
-	if got := pub.last(); got != "cd=18,md=3" {
-		t.Fatalf("expected output-enable remediation payload, got %q", got)
+	if pub.count() != 0 {
+		t.Fatalf("expected no output-enable remediation publish, got %d publishes (%q)", pub.count(), pub.last())
+	}
+}
+
+func TestStep_ControllerAuthority_RecoversFromSoCFloorWithOutputFlagsOff(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := defaultCfg("ctrl/topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Step 1: low SoC forces idle (a1=0,v1=0). Status reports o1/o2 as off.
+	lowSoC := freshDevStatus()
+	lowSoC.SOCPercent = 5
+	lowSoC.Output1Enabled = 0
+	lowSoC.Output2Enabled = 0
+	lowSoC.Slots[0] = marstek.ReadSlot{
+		Enabled: true,
+		Start:   "0:0",
+		End:     "23:59",
+		Watts:   240,
+	}
+	p.set(0, 0)
+	st.setFresh(lowSoC)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() error = %v", err)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("expected idle publish, got %d", pub.count())
+	}
+	idlePayload := pub.last()
+	if !strings.Contains(idlePayload, "cd=20,") || !strings.Contains(idlePayload, ",a1=0,") || !strings.Contains(idlePayload, ",v1=0,") {
+		t.Fatalf("expected idle schedule payload, got %q", idlePayload)
+	}
+	if strings.Contains(idlePayload, "cd=18,md=3") {
+		t.Fatalf("unexpected output-enable remediation payload: %q", idlePayload)
+	}
+
+	// Step 2: SoC recovers (charging) and grid import requires discharge.
+	// Even with o1/o2 still off in status, controller must publish normal slot control.
+	clk.advance(cfg.ControlInterval)
+	recovered := freshDevStatus()
+	recovered.SOCPercent = 35
+	recovered.Output1Enabled = 0
+	recovered.Output2Enabled = 0
+	recovered.Slots[0] = marstek.ReadSlot{
+		Enabled: false,
+		Start:   "0:0",
+		End:     "23:59",
+		Watts:   0,
+	}
+	p.set(200, 0)
+	st.setFresh(recovered)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() error = %v", err)
+	}
+	if pub.count() != 2 {
+		t.Fatalf("expected schedule publish after recovery, got %d", pub.count())
+	}
+	recoveredPayload := pub.last()
+	if strings.Contains(recoveredPayload, "cd=18,md=3") {
+		t.Fatalf("unexpected output-enable remediation payload after recovery: %q", recoveredPayload)
+	}
+	if !strings.Contains(recoveredPayload, "cd=20,") || !strings.Contains(recoveredPayload, ",a1=1,") || !strings.Contains(recoveredPayload, ",v1=200,") {
+		t.Fatalf("expected normal schedule recovery payload (v1=200), got %q", recoveredPayload)
 	}
 }
 

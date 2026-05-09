@@ -70,17 +70,7 @@ func (c *Controller) ensureDeviceConfig(now, observedAt time.Time, devStatus mar
 			"desired_mode", 0)
 		return handled, err
 	}
-
-	outputEnablePayload := marstek.BuildOutputEnablePayload(true, true)
-	if devStatus.Output1Enabled == 1 && devStatus.Output2Enabled == 1 {
-		c.clearPendingAuthorityPayload(outputEnablePayload)
-		return false, nil
-	}
-	handled, _, err := c.publishAuthorityPayload(now, observedAt, outputEnablePayload, "output_enable",
-		"o1", devStatus.Output1Enabled,
-		"o2", devStatus.Output2Enabled,
-		"desired_mask", 3)
-	return handled, err
+	return false, nil
 }
 
 func (c *Controller) desiredControlledSlot(devStatus marstek.Status, desiredWatts int) (marstek.Slot, [5]marstek.Slot) {

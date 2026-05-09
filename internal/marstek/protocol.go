@@ -160,9 +160,14 @@ type Status struct {
 	RemainingWh  int // kn
 	DoDPercent   int // do
 	ChargingMode int // cs: 0=simultaneous, 1=charge-then-discharge
-	AdaptiveMode int // md: 0=off, 1=on (am in some firmware; md in read payload)
+	// AdaptiveMode mirrors the read-side md field. Firmware semantics differ:
+	// on vv=110 it represented adaptive mode (0/1), while on vv=116 the same
+	// key can echo the output mask written via cd=18 (e.g. 3).
+	AdaptiveMode int // md in read payload
 
-	// Outputs (each port)
+	// Outputs (each port). On vv=116 observed payloads can report o1/o2=0 while
+	// g1/g2 are non-zero and timed-discharge slots remain active, so these flags
+	// are observability fields only and must not gate controller authority.
 	Output1Enabled int // o1
 	Output2Enabled int // o2
 	Output1Watts   int // g1

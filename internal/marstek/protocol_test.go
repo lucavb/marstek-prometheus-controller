@@ -11,6 +11,11 @@ import (
 // HMJ-2 device (firmware vv=110) during plan validation on 2026-04-18.
 const realDevicePayload = "p1=1,p2=1,w1=375,w2=380,pe=51,vv=110,sv=9,cs=0,cd=0,am=0,o1=1,o2=1,do=90,lv=240,cj=0,kn=1142,g1=120,g2=118,b1=0,b2=0,md=0,d1=1,e1=0:0,f1=23:59,h1=240,d2=0,e2=0:0,f2=23:59,h2=80,d3=0,e3=0:0,f3=23:59,h3=80,sg=0,sp=80,st=0,tl=24,th=25,tc=0,tf=0,fc=202310231502,id=5,a0=51,a1=0,a2=0,l0=2,l1=0,c0=255,c1=4,bc=4392,bs=3135,pt=4920,it=3229,m0=0,m1=0,m2=0,m3=238,d4=0,e4=0:0,f4=23:59,h4=80,d5=0,e5=0:0,f5=23:59,h5=80,lmo=2045,lmi=1483,lmf=0,uv=107,sm=0,bn=0,ct_t=7,tc_dis=1"
 
+// realDevicePayloadFW116 is a verbatim status payload captured from the live
+// HMJ-2 on firmware vv=116. It demonstrates that o1/o2 can be 0 while the
+// device is still outputting power (g1/g2) and slot 1 remains enabled.
+const realDevicePayloadFW116 = "p1=2,p2=2,w1=177,w2=156,pe=100,vv=116,sv=6,cs=0,cd=3,am=0,o1=0,o2=0,do=85,lv=150,cj=0,kn=2240,g1=172,g2=149,b1=0,b2=0,md=3,d1=1,e1=0:0,f1=23:59,h1=150,d2=0,e2=0:0,f2=23:59,h2=800,d3=0,e3=0:0,f3=23:59,h3=800,sg=0,sp=80,st=0,tl=26,th=27,tc=0,tf=0,fc=202409090159,id=5,a0=100,a1=0,a2=0,l0=0,l1=0,c0=255,c1=2,bc=1704,bs=508,pt=1862,it=569,m0=0,m1=0,m2=0,m3=321,d4=0,e4=0:0,f4=23:59,h4=800,d5=0,e5=0:0,f5=23:59,h5=800,lmo=2040,lmi=295,lmf=1,uv=107,sm=0,bn=0,ct_t=3,tc_dis=0,ws=-59,fktc=0"
+
 func TestRestartPayload(t *testing.T) {
 	if marstek.RestartPayload != "cd=10" {
 		t.Errorf("RestartPayload = %q, want %q", marstek.RestartPayload, "cd=10")
@@ -196,6 +201,32 @@ func TestParseStatus_RealPayload(t *testing.T) {
 	}
 	if s.Slots[1].Enabled {
 		t.Error("Slot 2 should be disabled (d2=0)")
+	}
+}
+
+func TestParseStatus_RealPayloadFW116(t *testing.T) {
+	s := marstek.ParseStatus(realDevicePayloadFW116)
+
+	if s.FirmwareMajor != 116 {
+		t.Fatalf("FirmwareMajor = %d, want 116", s.FirmwareMajor)
+	}
+	if s.Output1Enabled != 0 || s.Output2Enabled != 0 {
+		t.Fatalf("Output enabled flags = (%d,%d), want (0,0)", s.Output1Enabled, s.Output2Enabled)
+	}
+	if s.Output1Watts <= 0 || s.Output2Watts <= 0 {
+		t.Fatalf("expected active output watts, got g1=%d g2=%d", s.Output1Watts, s.Output2Watts)
+	}
+	if s.AdaptiveMode != 3 {
+		t.Fatalf("AdaptiveMode/read md = %d, want 3", s.AdaptiveMode)
+	}
+	if !s.Slots[0].Enabled || s.Slots[0].Watts != 150 {
+		t.Fatalf("slot1 = enabled:%v watts:%d, want enabled:true watts:150", s.Slots[0].Enabled, s.Slots[0].Watts)
+	}
+	if !s.PassThroughActive() {
+		t.Fatalf("PassThroughActive() = false, want true for p1=2,p2=2")
+	}
+	if !s.SurplusFeedIn {
+		t.Fatalf("SurplusFeedIn = false, want true for tc_dis=0")
 	}
 }
 
