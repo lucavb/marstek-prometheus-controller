@@ -72,7 +72,7 @@ type Metrics struct {
 	// Firmware pass-through and recovery
 	PassthroughActive         prometheus.Gauge       // 1 when p1/p2 indicate firmware pass-through
 	PassthroughStallDetected  prometheus.Counter     // rising edges of pass-through stalls
-	PassthroughRecoveryTotal  *prometheus.CounterVec // label: outcome (started|blocked_flash_guard|rate_limited|publish_error|restored)
+	PassthroughRecoveryTotal  *prometheus.CounterVec // label: outcome (nudge_started|nudge_charging_mode|nudge_schedule|unresolved_after_nudge|started|blocked_flash_guard|rate_limited|publish_error|restored)
 	SurplusFeedInToggledTotal *prometheus.CounterVec // label: direction (disable|restore)
 
 	// Scheduled device restart (opt-in; only emitted when DEVICE_RESTART_SCHEDULE is set).

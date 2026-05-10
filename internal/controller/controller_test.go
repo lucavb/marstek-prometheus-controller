@@ -2551,6 +2551,7 @@ func TestStep_PassthroughRecovery_BlockedWithoutFlashGuard(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	cfg.PassthroughStallDetectCycles = 2
 	cfg.PassthroughAutoRecovery = true
+	cfg.PassthroughAutoRecoveryFlashFallback = true
 	cfg.AllowFlashWrites = false
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
@@ -2570,7 +2571,7 @@ func TestStep_PassthroughRecovery_BlockedWithoutFlashGuard(t *testing.T) {
 	}
 }
 
-func TestStep_PassthroughRecovery_DisablesSurplusFeedInOnce(t *testing.T) {
+func TestStep_PassthroughRecovery_PublishesNudgesWithoutFlashFallback(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
@@ -2579,7 +2580,6 @@ func TestStep_PassthroughRecovery_DisablesSurplusFeedInOnce(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	cfg.PassthroughStallDetectCycles = 2
 	cfg.PassthroughAutoRecovery = true
-	cfg.AllowFlashWrites = true
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
@@ -2593,8 +2593,55 @@ func TestStep_PassthroughRecovery_DisablesSurplusFeedInOnce(t *testing.T) {
 		_ = c.Step(context.Background())
 	}
 
-	if got := pub.countContaining("cd=31,touchuan_disa=1"); got != 1 {
-		t.Fatalf("auto-recovery should disable surplus feed-in exactly once, got %d", got)
+	if got := pub.countContaining("cd=31,touchuan_disa=1"); got != 0 {
+		t.Fatalf("without flash fallback, recovery should preserve surplus feed-in (disable count %d)", got)
+	}
+	if got := pub.countContaining("cd=17,md=0"); got == 0 {
+		t.Fatalf("expected charging-mode nudge publish, got %d", got)
+	}
+	if got := pub.countContaining("cd=20,md=0"); got == 0 {
+		t.Fatalf("expected timed-discharge nudge publish, got %d", got)
+	}
+}
+
+func TestStep_PassthroughRecovery_DetectsStallBelowNearFullSoC(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 2
+	cfg.PassthroughAutoRecovery = true
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Prime the controller and exit near-full idle; we want to verify pass-through
+	// stall recovery outside the near-full SoC band.
+	p.set(0, 0)
+	st.setFresh(devStatusAtSoC(100, 150, 150, 0, 0))
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+	p.set(150, 0)
+	st.setFresh(devStatusAtSoCPassThrough(90, 150, 150, 0, 0))
+	for i := 0; i < cfg.NearFullIdleGridImportExitSamples; i++ {
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	for i := 0; i < cfg.PassthroughStallDetectCycles+2; i++ {
+		p.set(150, 0)
+		st.setFresh(devStatusAtSoCPassThrough(90, 150, 150, 0, 0))
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	if got := pub.countContaining("cd=31,touchuan_disa=1"); got != 0 {
+		t.Fatalf("outside near-full SoC, recovery should still preserve feed-in by default; disable count %d", got)
+	}
+	if got := pub.countContaining("cd=17,md=0"); got == 0 {
+		t.Fatalf("expected non-flash nudge outside near-full SoC, got %d", got)
 	}
 }
 
@@ -2607,6 +2654,7 @@ func TestStep_PassthroughRecovery_NormalControlRunsAfterDisable(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	cfg.PassthroughStallDetectCycles = 2
 	cfg.PassthroughAutoRecovery = true
+	cfg.PassthroughAutoRecoveryFlashFallback = true
 	cfg.AllowFlashWrites = true
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
@@ -2615,7 +2663,7 @@ func TestStep_PassthroughRecovery_NormalControlRunsAfterDisable(t *testing.T) {
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
-	for i := 0; i < cfg.PassthroughStallDetectCycles; i++ {
+	for i := 0; i < cfg.PassthroughStallDetectCycles+2; i++ {
 		p.set(150, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
 		_ = c.Step(context.Background())
@@ -2642,6 +2690,7 @@ func TestStep_PassthroughRecovery_RestoresWhenBatteryLeavesFullPlateau(t *testin
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	cfg.PassthroughStallDetectCycles = 2
 	cfg.PassthroughAutoRecovery = true
+	cfg.PassthroughAutoRecoveryFlashFallback = true
 	cfg.AllowFlashWrites = true
 	cfg.PassthroughAutoRecoveryRestoreDelay = time.Hour
 	c := controller.New(cfg, p, pub, st, clk, nil)
@@ -2651,7 +2700,7 @@ func TestStep_PassthroughRecovery_RestoresWhenBatteryLeavesFullPlateau(t *testin
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
-	for i := 0; i < cfg.PassthroughStallDetectCycles; i++ {
+	for i := 0; i < cfg.PassthroughStallDetectCycles+2; i++ {
 		p.set(150, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
 		_ = c.Step(context.Background())
@@ -2674,6 +2723,7 @@ func TestStep_PassthroughRecovery_RateLimitsRepeatedEvents(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	cfg.PassthroughStallDetectCycles = 1
 	cfg.PassthroughAutoRecovery = true
+	cfg.PassthroughAutoRecoveryFlashFallback = true
 	cfg.AllowFlashWrites = true
 	cfg.PassthroughAutoRecoveryMinInterval = time.Hour
 	cfg.PassthroughAutoRecoveryRestoreDelay = 0
@@ -2687,6 +2737,9 @@ func TestStep_PassthroughRecovery_RateLimitsRepeatedEvents(t *testing.T) {
 	p.set(150, 0)
 	st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
 	_ = c.Step(context.Background())
+	p.set(150, 0)
+	st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+	_ = c.Step(context.Background())
 	p.set(0, 0)
 	st.setFresh(devStatusAtSoCNoFeedIn(94, 0, 0, 80, 80))
 	_ = c.Step(context.Background())
@@ -2696,6 +2749,9 @@ func TestStep_PassthroughRecovery_RateLimitsRepeatedEvents(t *testing.T) {
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 123, 123))
 		_ = c.Step(context.Background())
 	}
+	p.set(150, 0)
+	st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
+	_ = c.Step(context.Background())
 	p.set(150, 0)
 	st.setFresh(devStatusAtSoCPassThrough(100, 150, 150, 0, 0))
 	_ = c.Step(context.Background())
@@ -2713,6 +2769,7 @@ func TestStep_PassthroughRecovery_DoesNotRestoreIfNotControllerDisabled(t *testi
 
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	cfg.PassthroughAutoRecovery = true
+	cfg.PassthroughAutoRecoveryFlashFallback = true
 	cfg.AllowFlashWrites = true
 	c := controller.New(cfg, p, pub, st, clk, nil)
 

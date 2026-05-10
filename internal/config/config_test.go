@@ -287,6 +287,9 @@ func TestLoad_PassthroughRecoveryDefaults(t *testing.T) {
 	if cfg.PassthroughAutoRecovery {
 		t.Error("PassthroughAutoRecovery default = true, want false")
 	}
+	if cfg.PassthroughAutoRecoveryFlashFallback {
+		t.Error("PassthroughAutoRecoveryFlashFallback default = true, want false")
+	}
 	if cfg.PassthroughStallDetectCycles != 5 {
 		t.Errorf("PassthroughStallDetectCycles = %d, want 5", cfg.PassthroughStallDetectCycles)
 	}
@@ -308,6 +311,19 @@ func TestLoad_PassthroughRecoveryAllowsFlashGuardToBeEnabledSeparately(t *testin
 	}
 	if cfg.AllowFlashWrites {
 		t.Error("AllowFlashWrites should remain false unless ALLOW_FLASH_WRITES is explicitly set")
+	}
+}
+
+func TestLoad_PassthroughRecoveryFlashFallbackRequiresAutoRecovery(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK", "true")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() expected error when flash fallback enabled without auto recovery")
+	}
+	if !strings.Contains(err.Error(), "PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK=true requires PASSTHROUGH_AUTO_RECOVERY=true") {
+		t.Fatalf("error = %q, want flash fallback dependency validation", err.Error())
 	}
 }
 

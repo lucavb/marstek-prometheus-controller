@@ -139,11 +139,12 @@ func run() error {
 		NearFullIdleGridImportExitWatts:   cfg.NearFullIdleGridImportExitWatts,
 		NearFullIdleGridImportExitSamples: cfg.NearFullIdleGridImportExitSamples,
 
-		PassthroughStallDetectCycles:        cfg.PassthroughStallDetectCycles,
-		PassthroughStallMinCommandWatts:     cfg.PassthroughStallMinCommandWatts,
-		PassthroughAutoRecovery:             cfg.PassthroughAutoRecovery,
-		PassthroughAutoRecoveryMinInterval:  cfg.PassthroughAutoRecoveryMinInterval,
-		PassthroughAutoRecoveryRestoreDelay: cfg.PassthroughAutoRecoveryRestoreDelay,
+		PassthroughStallDetectCycles:         cfg.PassthroughStallDetectCycles,
+		PassthroughStallMinCommandWatts:      cfg.PassthroughStallMinCommandWatts,
+		PassthroughAutoRecovery:              cfg.PassthroughAutoRecovery,
+		PassthroughAutoRecoveryFlashFallback: cfg.PassthroughAutoRecoveryFlashFallback,
+		PassthroughAutoRecoveryMinInterval:   cfg.PassthroughAutoRecoveryMinInterval,
+		PassthroughAutoRecoveryRestoreDelay:  cfg.PassthroughAutoRecoveryRestoreDelay,
 	}
 
 	ctrl := controller.New(ctrlCfg, prom, mqtt, statusSrc, nil, m)

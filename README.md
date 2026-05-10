@@ -119,18 +119,20 @@ pass-through is active (`p1`/`p2` bit 1 set): pass-through can still make the
 B2500 ignore timed-discharge slots, but it must not keep the controller in
 intentional idle while the apartment is importing.
 
-**Pass-through stall recovery:** at full SoC with surplus feed-in enabled, the
-B2500 firmware may enter solar pass-through and acknowledge timed-discharge
-slots while still reporting `g1=g2=0`. If solar is below house load, the grid
-imports even though the controller is trying to command discharge. The
-controller detects this as a pass-through stall. By default it only logs and
-exports metrics. To have it actually force discharge, set both
-`PASSTHROUGH_AUTO_RECOVERY=true` and `ALLOW_FLASH_WRITES=true`. Recovery writes
-the device's flash-only surplus-feed-in setting (`cd=31,touchuan_disa=1`) once
-to break pass-through, lets normal timed-discharge control run, then restores
-surplus feed-in (`cd=31,touchuan_disa=0`) after the battery leaves the full
-plateau or the restore delay expires. Expect two flash writes per recovery
-event.
+**Pass-through stall recovery:** with surplus feed-in enabled, firmware
+pass-through can occasionally stall timed discharge (`g1=g2=0`) even while the
+controller is commanding a non-zero target and the grid is importing. Recovery
+is intentionally staged to preserve surplus feed-in by default:
+
+1. Detect sustained stall conditions (`import + commanded discharge + zero output`).
+2. Publish non-flash runtime nudges (`cd=17` charging mode + `cd=20`
+   timed-discharge reassertion) while keeping `tc_dis=0`.
+3. If the stall persists, log/metric it as unresolved.
+
+The flash-only surplus-feed-in toggle (`cd=31`) is a **last-resort fallback**
+and is disabled by default. To allow that fallback, set all three:
+`PASSTHROUGH_AUTO_RECOVERY=true`, `PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK=true`,
+and `ALLOW_FLASH_WRITES=true`.
 
 **Hard dependency on surplus feed-in (`tc_dis=0`):** near-full idle will only
 engage when the device reports `SurplusFeedIn = true`. With surplus feed-in
@@ -206,11 +208,12 @@ All settings are environment variables:
 | `NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS`       | `25`                       | Smoothed-grid export threshold (W) required to count an idle-entry sample. This prevents tiny export/noise around zero from disabling discharge; set to `0` to restore the older balanced-or-exporting entry gate. Must be ≥ 0.                                   |
 | `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS`   | `50`                       | Smoothed-grid import threshold (W) above which an "import sample" is counted while idle is active. Should mirror `IMPORT_BIAS_WATTS` — setting it lower can cause flapping because normal control would not command a discharge on exit. Must be ≥ 0.             |
 | `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` | `8`                        | Consecutive high-import samples required to exit idle via the grid-import path (≈ 2 min at the 15 s control interval). Set to `0` to disable this exit path entirely (SoC-only behaviour). Must be ≥ 0.                                                           |
-| `PASSTHROUGH_STALL_DETECT_CYCLES`         | `5`                        | Consecutive cycles of full-SOC firmware pass-through, sustained grid import, commanded non-zero discharge, and `g1+g2=0` before a pass-through stall is recorded. Set to `0` to disable detection.                                                                |
+| `PASSTHROUGH_STALL_DETECT_CYCLES`         | `5`                        | Consecutive cycles of firmware pass-through, sustained grid import, commanded non-zero discharge, and `g1+g2=0` before a pass-through stall is recorded. Set to `0` to disable detection.                                                                           |
 | `PASSTHROUGH_STALL_MIN_COMMAND_WATTS`     | `MIN_OUTPUT_WATTS`         | Minimum commanded or computed discharge target required to arm pass-through stall detection.                                                                                                                                                                      |
-| `PASSTHROUGH_AUTO_RECOVERY`               | `false`                    | Opt-in recovery for full-SOC pass-through stalls. Requires `ALLOW_FLASH_WRITES=true` before any flash-only surplus-feed-in toggle is sent.                                                                                                                        |
-| `PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL`  | `1h`                       | Minimum time between automatic pass-through recovery starts. Prevents repeated flash writes if the device keeps re-entering the same state.                                                                                                                       |
-| `PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY` | `5m`                       | Maximum time to leave surplus feed-in disabled after auto-recovery starts before restoring it, unless SoC drops below the near-full exit threshold first.                                                                                                         |
+| `PASSTHROUGH_AUTO_RECOVERY`               | `false`                    | Opt-in staged recovery for pass-through stalls. Publishes non-flash runtime nudges first and preserves surplus feed-in by default.                                                                                                                                |
+| `PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK`| `false`                    | Optional last-resort fallback that allows flash-only surplus-feed-in toggles (`cd=31`) if non-flash nudges fail. Requires `PASSTHROUGH_AUTO_RECOVERY=true` and `ALLOW_FLASH_WRITES=true`.                                                                         |
+| `PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL`  | `1h`                       | Minimum time between automatic pass-through recovery attempts. Prevents repeated recovery churn if the device keeps re-entering the same stalled state.                                                                                                            |
+| `PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY` | `5m`                       | When flash fallback is enabled and used, maximum time to leave surplus feed-in disabled before restoring it, unless SoC drops below the near-full exit threshold first.                                                                                           |
 | `DEVICE_RESTART_SCHEDULE`                 | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4` * * * for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart).                                     |
 | `DEVICE_RESTART_TIMEZONE`                 | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty.                                                                                                                                         |
 

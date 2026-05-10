@@ -92,11 +92,15 @@ type Config struct {
 	// Pass-through stall detection and opt-in recovery. Auto-recovery publishes
 	// the device's flash-only surplus-feed-in command, so AllowFlashWrites must
 	// also be true before any recovery write is attempted.
-	PassthroughStallDetectCycles        int
-	PassthroughStallMinCommandWatts     int
-	PassthroughAutoRecovery             bool
-	PassthroughAutoRecoveryMinInterval  time.Duration
-	PassthroughAutoRecoveryRestoreDelay time.Duration
+	PassthroughStallDetectCycles    int
+	PassthroughStallMinCommandWatts int
+	PassthroughAutoRecovery         bool
+	// PassthroughAutoRecoveryFlashFallback controls whether the controller may
+	// use the flash-only surplus-feed-in toggle (cd=31) as a last-resort escape
+	// hatch when non-flash recovery nudges fail.
+	PassthroughAutoRecoveryFlashFallback bool
+	PassthroughAutoRecoveryMinInterval   time.Duration
+	PassthroughAutoRecoveryRestoreDelay  time.Duration
 }
 
 // Controller is the main control loop.
@@ -155,6 +159,9 @@ type Controller struct {
 	// pass-through stall/recovery state.
 	passthroughStallCycles            int
 	passthroughStallActive            bool
+	passthroughNudgePending           bool
+	passthroughNudgeAt                time.Time
+	loggedPassthroughUnresolved       bool
 	passthroughRecoveryActive         bool
 	passthroughRecoveryStartedAt      time.Time
 	lastPassthroughRecoveryAt         time.Time

@@ -93,16 +93,16 @@ type Config struct {
 	NearFullIdleGridImportExitWatts   int
 	NearFullIdleGridImportExitSamples int
 
-	// Pass-through stall detection and opt-in recovery. At full SoC with
-	// surplus feed-in enabled, the B2500 firmware can enter pass-through and
-	// ignore timed-discharge slots. Detection is always safe; auto-recovery
-	// publishes the flash-only cd=31 surplus-feed-in command and is therefore
+	// Pass-through stall detection and opt-in recovery. Detection is always safe.
+	// Auto-recovery first publishes non-flash runtime nudges (cd=17/cd=20) while
+	// preserving surplus feed-in. The optional flash fallback uses cd=31 and is
 	// additionally gated in the controller by AllowFlashWrites.
-	PassthroughStallDetectCycles        int
-	PassthroughStallMinCommandWatts     int
-	PassthroughAutoRecovery             bool
-	PassthroughAutoRecoveryMinInterval  time.Duration
-	PassthroughAutoRecoveryRestoreDelay time.Duration
+	PassthroughStallDetectCycles         int
+	PassthroughStallMinCommandWatts      int
+	PassthroughAutoRecovery              bool
+	PassthroughAutoRecoveryFlashFallback bool
+	PassthroughAutoRecoveryMinInterval   time.Duration
+	PassthroughAutoRecoveryRestoreDelay  time.Duration
 
 	// Scheduled device restart — opt-in workaround for a device that hangs
 	// periodically. Empty schedule disables the feature entirely.
@@ -166,11 +166,12 @@ func Load() (Config, error) {
 		NearFullIdleGridImportExitWatts:   getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS", 50),
 		NearFullIdleGridImportExitSamples: getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", 8),
 
-		PassthroughStallDetectCycles:        getEnvInt("PASSTHROUGH_STALL_DETECT_CYCLES", 5),
-		PassthroughStallMinCommandWatts:     getEnvInt("PASSTHROUGH_STALL_MIN_COMMAND_WATTS", 80),
-		PassthroughAutoRecovery:             getEnvBool("PASSTHROUGH_AUTO_RECOVERY", false),
-		PassthroughAutoRecoveryMinInterval:  getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL", time.Hour),
-		PassthroughAutoRecoveryRestoreDelay: getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY", 5*time.Minute),
+		PassthroughStallDetectCycles:         getEnvInt("PASSTHROUGH_STALL_DETECT_CYCLES", 5),
+		PassthroughStallMinCommandWatts:      getEnvInt("PASSTHROUGH_STALL_MIN_COMMAND_WATTS", 80),
+		PassthroughAutoRecovery:              getEnvBool("PASSTHROUGH_AUTO_RECOVERY", false),
+		PassthroughAutoRecoveryFlashFallback: getEnvBool("PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK", false),
+		PassthroughAutoRecoveryMinInterval:   getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL", time.Hour),
+		PassthroughAutoRecoveryRestoreDelay:  getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY", 5*time.Minute),
 
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
 	}
@@ -292,6 +293,9 @@ func (c *Config) validate() error {
 	}
 	if c.PassthroughAutoRecoveryRestoreDelay < 0 {
 		errs = append(errs, "PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY must be >= 0")
+	}
+	if c.PassthroughAutoRecoveryFlashFallback && !c.PassthroughAutoRecovery {
+		errs = append(errs, "PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK=true requires PASSTHROUGH_AUTO_RECOVERY=true")
 	}
 
 	if c.DeviceRestartSchedule != "" {
