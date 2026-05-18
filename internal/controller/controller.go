@@ -1,17 +1,11 @@
 // Package controller implements the battery discharge control loop.
 //
 // Each iteration (Step):
-//  1. Query Prometheus for the current grid power (electricity_power_watts).
-//  2. Obtain live device status from the MQTT status source (with self-poll
-//     watchdog if stale).
-//  3. Apply EMA smoothing to the grid power signal.
-//  4. Compute a raw target: (smoothed - ImportBiasWatts) clamped to [0, maxOutput].
-//     The bias keeps a small deliberate grid import so the battery never tries to
-//     reach exact zero — exported energy cannot be recovered.
-//  5. Apply ramp limits (export fast-path skips ramp-down when grid is negative)
-//     and min-hold-time suppression.
-//  6. Publish a full 5-slot timed-discharge command with the new slot power.
-//  7. Update all Prometheus metrics.
+//  1. Query Prometheus and obtain fresh MQTT status.
+//  2. Derive device facts and enforce runtime authority.
+//  3. Choose a policy outcome: safety idle, full-charge pass-through idle, or
+//     normal discharge control.
+//  4. Compute one discharge target, then apply ramp and publish suppression.
 //
 // Control is intentionally biased toward slight grid import to avoid wasting
 // energy through accidental export. The B2500 enforces its own DoD/SOC floor.
@@ -66,41 +60,17 @@ type Config struct {
 	BatterySoCHysteresisPercent    int
 	BatterySoCFloorFallbackPercent int
 
-	// Near-full idle — disables the controlled slot near full charge so the
-	// controller stops fighting the BMS and lets the device's firmware
-	// surplus-feed-in path route excess PV to the grid. Gated on the device
-	// reporting SurplusFeedIn=true; without it, normal control runs because
-	// idling would strand PV at full SoC.
-	NearFullIdleEnabled            bool
-	NearFullIdleEnterPercent       int
-	NearFullIdleExitPercent        int
-	NearFullIdleConsecutiveSamples int
-	// NearFullIdleEntryExportWatts is the minimum smoothed export required to
-	// enter idle; it keeps meter noise around zero from disabling discharge.
-	NearFullIdleEntryExportWatts int
-
-	// Secondary exit out of near-full idle based on sustained grid import.
-	// The SoC-based exit alone deadlocks at full charge when no discharge is
-	// happening (SoC cannot fall, so the exit threshold is never reached);
-	// when smoothed grid import exceeds NearFullIdleGridImportExitWatts for
-	// NearFullIdleGridImportExitSamples consecutive cycles, idle exits and
-	// normal control resumes, letting the battery cover house load.
-	// Samples=0 disables this exit path entirely.
+	// Top-charge idle — disables the controlled slot only when the battery is
+	// truly full and there is evidence that PV can be passed through by firmware.
+	NearFullIdleEnabled               bool
+	NearFullIdleEnterPercent          int // default 100: only true full charge enters top-charge idle
+	NearFullIdleConsecutiveSamples    int // consecutive samples for entry and SoC exit debounce
 	NearFullIdleGridImportExitWatts   int
 	NearFullIdleGridImportExitSamples int
 
-	// Pass-through stall detection and opt-in recovery. Auto-recovery publishes
-	// the device's flash-only surplus-feed-in command, so AllowFlashWrites must
-	// also be true before any recovery write is attempted.
-	PassthroughStallDetectCycles    int
-	PassthroughStallMinCommandWatts int
-	PassthroughAutoRecovery         bool
-	// PassthroughAutoRecoveryFlashFallback controls whether the controller may
-	// use the flash-only surplus-feed-in toggle (cd=31) as a last-resort escape
-	// hatch when non-flash recovery nudges fail.
-	PassthroughAutoRecoveryFlashFallback bool
-	PassthroughAutoRecoveryMinInterval   time.Duration
-	PassthroughAutoRecoveryRestoreDelay  time.Duration
+	// Surplus feed-in authority. The device exposes this as a persistent setting,
+	// so automatic remediation is gated by AllowFlashWrites and rate-limited.
+	SurplusFeedInRecoveryMinInterval time.Duration
 }
 
 // Controller is the main control loop.
@@ -134,44 +104,21 @@ type Controller struct {
 	// It stays true until SoC climbs back above (softFloor + hysteresis).
 	socFloorActive bool
 
-	// nearFullIdleActive is true while the controller is suppressing discharge
-	// because SoC is in the near-full band. Entry and exit are debounced by
-	// NearFullIdleConsecutiveSamples samples each so LFP top-end SoC flicker
-	// does not flap the mode.
-	nearFullIdleActive bool
-	// nearFullIdleEnterSamples counts consecutive inactive-state cycles where
-	// SoC >= NearFullIdleEnterPercent and the regime is otherwise gated on.
-	nearFullIdleEnterSamples int
-	// nearFullIdleExitSamples counts consecutive active-state cycles where
-	// SoC < NearFullIdleExitPercent.
-	nearFullIdleExitSamples int
-	// nearFullIdleGridImportSamples counts consecutive active-state cycles
-	// where smoothed grid power exceeds NearFullIdleGridImportExitWatts. It
-	// feeds the secondary "grid_import" exit reason, which breaks the
-	// SoC-deadlock when solar drops below house load while the battery sits
-	// at full charge.
-	nearFullIdleGridImportSamples int
-	// lastNearFullIdleExportAt records the most recent meaningful export sample
-	// seen in the near-full band. Firmware pass-through alone is too noisy on
-	// fw116 to arm idle; we only trust it as a supporting signal when a real
-	// export happened recently.
-	lastNearFullIdleExportAt time.Time
+	// topChargeIdleActive is true while the controller is intentionally leaving
+	// the controlled slot disabled so full-charge PV can pass through firmware.
+	topChargeIdleActive         bool
+	topChargeIdleEnterSamples   int
+	topChargeIdleSoCExitSamples int
+	topChargeIdleImportSamples  int
 
-	// transientZeroFiredLastCycle prevents the transient-zero-output guard from
-	// holding for more than one consecutive cycle.
-	transientZeroFiredLastCycle bool
+	// outputBlockedCycles counts consecutive cycles where the controller wants
+	// discharge, the slot is already armed, but the device still reports no
+	// solar and no output. This is treated as a runtime precondition failure
+	// (outputs blocked), not as a control-law problem.
+	outputBlockedCycles int
 
-	// pass-through stall/recovery state.
-	passthroughStallCycles            int
-	passthroughStallActive            bool
-	passthroughNudgePending           bool
-	passthroughNudgeAt                time.Time
-	loggedPassthroughUnresolved       bool
-	passthroughRecoveryActive         bool
-	passthroughRecoveryStartedAt      time.Time
-	lastPassthroughRecoveryAt         time.Time
-	surplusFeedInDisabledByController bool
-	loggedPassthroughRecoveryBlocked  bool
+	lastSurplusFeedInRecoveryAt time.Time
+	loggedSurplusFeedInBlocked  bool
 }
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil
@@ -235,22 +182,20 @@ func (c *Controller) Ready() bool {
 	return c.ready
 }
 
-// resetNearFullIdleState clears all near-full idle state. When the mode was
-// previously active the exit counters are bumped so operators can distinguish
-// deliberate SoC-driven exits from fallback / config-driven resets. Returns
-// true when the reset took effect from an active state.
-func (c *Controller) resetNearFullIdleState(reason string) bool {
-	wasActive := c.nearFullIdleActive
-	c.nearFullIdleActive = false
-	c.nearFullIdleEnterSamples = 0
-	c.nearFullIdleExitSamples = 0
-	c.nearFullIdleGridImportSamples = 0
+// resetTopChargeIdleState clears top-charge idle state. When the mode was
+// active, metrics record the exit reason.
+func (c *Controller) resetTopChargeIdleState(reason string) bool {
+	wasActive := c.topChargeIdleActive
+	c.topChargeIdleActive = false
+	c.topChargeIdleEnterSamples = 0
+	c.topChargeIdleSoCExitSamples = 0
+	c.topChargeIdleImportSamples = 0
 	if c.m != nil {
-		c.m.NearFullIdleActive.Set(0)
+		c.m.TopChargeIdleActive.Set(0)
 		if wasActive {
-			c.m.NearFullIdleExited.Inc()
+			c.m.TopChargeIdleExited.Inc()
 			if reason != "" {
-				c.m.NearFullIdleExitReasonTotal.WithLabelValues(reason).Inc()
+				c.m.TopChargeIdleExitReasonTotal.WithLabelValues(reason).Inc()
 			}
 		}
 	}

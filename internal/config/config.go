@@ -67,42 +67,17 @@ type Config struct {
 	BatterySoCHysteresisPercent    int // resume SoC = soft floor + this; default 5
 	BatterySoCFloorFallbackPercent int // used when DoDPercent is 0/unknown; default 15
 
-	// Near-full idle — disables the controlled slot near the top of charge so
-	// the controller does not fight the BMS or force discharge to make room
-	// for solar. Excess PV is carried through by the device's firmware
-	// surplus-feed-in path (tc_dis=0 in the Marstek app), which is a
-	// precondition for engaging the regime: if surplus feed-in is off,
-	// idling would strand PV at full SoC, so normal control runs instead.
-	NearFullIdleEnabled            bool
-	NearFullIdleEnterPercent       int // SoC >= this for N cycles enters idle
-	NearFullIdleExitPercent        int // SoC < this for N cycles exits idle (must be < NearFullIdleEnterPercent)
-	NearFullIdleConsecutiveSamples int // N consecutive samples for debounced entry and exit
-	NearFullIdleEntryExportWatts   int // smoothed export must be at least this large to enter idle
-
-	// Sustained-grid-import exit path out of near-full idle. The SoC-based
-	// exit alone deadlocks when the slot is disabled: with no discharge, SoC
-	// cannot fall below the SoC exit threshold, so idle never lifts when
-	// solar drops below house load. These two knobs add a secondary exit:
-	// when smoothed grid import exceeds NearFullIdleGridImportExitWatts for
-	// NearFullIdleGridImportExitSamples consecutive cycles, idle exits and
-	// normal control resumes — the battery immediately begins covering the
-	// house load. The default threshold matches the default ImportBiasWatts
-	// so "exit" lines up exactly with "normal control would now discharge";
-	// setting it lower than ImportBiasWatts can cause flap. Setting samples
-	// to 0 disables this exit path entirely (zero-risk rollback).
+	// Top-charge idle — disables the controlled slot only when the battery is
+	// full and there is evidence that PV can pass through via surplus feed-in.
+	NearFullIdleEnabled               bool
+	NearFullIdleEnterPercent          int // default 100
+	NearFullIdleConsecutiveSamples    int // N consecutive samples for entry and SoC exit
 	NearFullIdleGridImportExitWatts   int
 	NearFullIdleGridImportExitSamples int
 
-	// Pass-through stall detection and opt-in recovery. Detection is always safe.
-	// Auto-recovery first publishes non-flash runtime nudges (cd=17/cd=20) while
-	// preserving surplus feed-in. The optional flash fallback uses cd=31 and is
-	// additionally gated in the controller by AllowFlashWrites.
-	PassthroughStallDetectCycles         int
-	PassthroughStallMinCommandWatts      int
-	PassthroughAutoRecovery              bool
-	PassthroughAutoRecoveryFlashFallback bool
-	PassthroughAutoRecoveryMinInterval   time.Duration
-	PassthroughAutoRecoveryRestoreDelay  time.Duration
+	// Surplus feed-in recovery writes a persistent device setting, so it remains
+	// gated by ALLOW_FLASH_WRITES and is heavily rate-limited.
+	SurplusFeedInRecoveryMinInterval time.Duration
 
 	// Scheduled device restart — opt-in workaround for a device that hangs
 	// periodically. Empty schedule disables the feature entirely.
@@ -158,27 +133,16 @@ func Load() (Config, error) {
 		BatterySoCFloorFallbackPercent: getEnvInt("BATTERY_SOC_FLOOR_FALLBACK_PERCENT", 15),
 
 		NearFullIdleEnabled:            getEnvBool("NEAR_FULL_IDLE_ENABLED", true),
-		NearFullIdleEnterPercent:       getEnvInt("NEAR_FULL_IDLE_ENTER_PERCENT", 98),
-		NearFullIdleExitPercent:        getEnvInt("NEAR_FULL_IDLE_EXIT_PERCENT", 95),
+		NearFullIdleEnterPercent:       getEnvInt("NEAR_FULL_IDLE_ENTER_PERCENT", 100),
 		NearFullIdleConsecutiveSamples: getEnvInt("NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES", 2),
-		NearFullIdleEntryExportWatts:   getEnvInt("NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS", 25),
 
 		NearFullIdleGridImportExitWatts:   getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS", 50),
-		NearFullIdleGridImportExitSamples: getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", 8),
+		NearFullIdleGridImportExitSamples: getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", 4),
 
-		PassthroughStallDetectCycles:         getEnvInt("PASSTHROUGH_STALL_DETECT_CYCLES", 5),
-		PassthroughStallMinCommandWatts:      getEnvInt("PASSTHROUGH_STALL_MIN_COMMAND_WATTS", 80),
-		PassthroughAutoRecovery:              getEnvBool("PASSTHROUGH_AUTO_RECOVERY", false),
-		PassthroughAutoRecoveryFlashFallback: getEnvBool("PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK", false),
-		PassthroughAutoRecoveryMinInterval:   getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL", time.Hour),
-		PassthroughAutoRecoveryRestoreDelay:  getEnvDuration("PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY", 5*time.Minute),
+		SurplusFeedInRecoveryMinInterval: getEnvDuration("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", 6*time.Hour),
 
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
 	}
-	if _, ok := os.LookupEnv("PASSTHROUGH_STALL_MIN_COMMAND_WATTS"); !ok {
-		cfg.PassthroughStallMinCommandWatts = cfg.MinOutputWatts
-	}
-
 	// Parse timezone only when a schedule is configured. This keeps the
 	// time/tzdata database lookup out of the hot path and makes it clear that
 	// DEVICE_RESTART_TIMEZONE is a no-op when the feature is disabled.
@@ -264,17 +228,8 @@ func (c *Config) validate() error {
 	if c.NearFullIdleEnterPercent < 1 || c.NearFullIdleEnterPercent > 100 {
 		errs = append(errs, "NEAR_FULL_IDLE_ENTER_PERCENT must be 1–100")
 	}
-	if c.NearFullIdleExitPercent < 0 || c.NearFullIdleExitPercent > 99 {
-		errs = append(errs, "NEAR_FULL_IDLE_EXIT_PERCENT must be 0–99")
-	}
-	if c.NearFullIdleExitPercent >= c.NearFullIdleEnterPercent {
-		errs = append(errs, "NEAR_FULL_IDLE_EXIT_PERCENT must be less than NEAR_FULL_IDLE_ENTER_PERCENT")
-	}
 	if c.NearFullIdleConsecutiveSamples < 1 {
 		errs = append(errs, "NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES must be >= 1")
-	}
-	if c.NearFullIdleEntryExportWatts < 0 {
-		errs = append(errs, "NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS must be >= 0")
 	}
 	if c.NearFullIdleGridImportExitWatts < 0 {
 		errs = append(errs, "NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS must be >= 0")
@@ -282,20 +237,8 @@ func (c *Config) validate() error {
 	if c.NearFullIdleGridImportExitSamples < 0 {
 		errs = append(errs, "NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES must be >= 0 (0 disables the grid-import exit path)")
 	}
-	if c.PassthroughStallDetectCycles < 0 {
-		errs = append(errs, "PASSTHROUGH_STALL_DETECT_CYCLES must be >= 0 (0 disables pass-through stall detection)")
-	}
-	if c.PassthroughStallMinCommandWatts < 0 {
-		errs = append(errs, "PASSTHROUGH_STALL_MIN_COMMAND_WATTS must be >= 0")
-	}
-	if c.PassthroughAutoRecoveryMinInterval < 0 {
-		errs = append(errs, "PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL must be >= 0")
-	}
-	if c.PassthroughAutoRecoveryRestoreDelay < 0 {
-		errs = append(errs, "PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY must be >= 0")
-	}
-	if c.PassthroughAutoRecoveryFlashFallback && !c.PassthroughAutoRecovery {
-		errs = append(errs, "PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK=true requires PASSTHROUGH_AUTO_RECOVERY=true")
+	if c.SurplusFeedInRecoveryMinInterval < 0 {
+		errs = append(errs, "SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL must be >= 0")
 	}
 
 	if c.DeviceRestartSchedule != "" {

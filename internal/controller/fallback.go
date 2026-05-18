@@ -15,10 +15,10 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 		c.m.FallbackTotal.WithLabelValues(reason).Inc()
 		c.m.SetState(metrics.StateFallback)
 	}
-	if c.resetNearFullIdleState("fallback") {
-		slog.Info("near-full idle deactivated", "reason", "fallback")
+	if c.resetTopChargeIdleState("fallback") {
+		slog.Info("top-charge idle deactivated", "reason", "fallback")
 	}
-	c.resetPassthroughStall()
+	c.outputBlockedCycles = 0
 
 	// Prefer the last known device status so the other four schedule slots are
 	// preserved. Fall back to a zero status only if we have never successfully
@@ -70,9 +70,8 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 }
 
 // commandIdle disables the controlled slot and sets state to idle. It is used
-// in deliberately-idle regimes (SoC soft floor below, near-full idle near the
-// top) where commanding anything would either fight the BMS or force a
-// pointless discharge. Unlike fallback(), it increments CommandSuppressedTotal
+// in deliberately-idle regimes where commanding anything would either fight the
+// BMS or force a pointless discharge. Unlike fallback(), it increments CommandSuppressedTotal
 // with the caller-supplied reason rather than FallbackTotal, and always
 // preserves the other four slots from the freshly-read devStatus (not the
 // cached lastStatus).

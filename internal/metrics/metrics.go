@@ -60,21 +60,18 @@ type Metrics struct {
 	BatteryTempMinCelsius      prometheus.Gauge // device-reported min cell temp (tl); observability only
 	BatteryTempMaxCelsius      prometheus.Gauge // device-reported max cell temp (th); observability only
 
-	// Near-full idle regime state
-	NearFullIdleActive           prometheus.Gauge       // 1 while the controller is suppressing discharge near full charge
-	NearFullIdleEntered          prometheus.Counter     // incremented on each rising edge (inactive → active)
-	NearFullIdleEntryReasonTotal *prometheus.CounterVec // label: reason (export, passthrough, mixed)
-	NearFullIdleExited           prometheus.Counter     // incremented on each falling edge (active → inactive)
-	NearFullIdleExitReasonTotal  *prometheus.CounterVec // label: reason (soc_exit, grid_import, fallback, surplus_feed_in_disabled, disabled)
+	// Top-charge idle regime state
+	TopChargeIdleActive          prometheus.Gauge       // 1 while suppressing discharge so full-charge PV can pass through
+	TopChargeIdleEntered         prometheus.Counter     // incremented on each rising edge
+	TopChargeIdleExited          prometheus.Counter     // incremented on each falling edge
+	TopChargeIdleExitReasonTotal *prometheus.CounterVec // label: reason
 
 	// Device feed-in flag mirrored from device status (tc_dis)
 	SurplusFeedInEnabled prometheus.Gauge // 1 when tc_dis=0 (feed-in enabled), 0 when tc_dis=1
 
-	// Firmware pass-through and recovery
+	// Firmware pass-through and authority remediation
 	PassthroughActive         prometheus.Gauge       // 1 when p1/p2 indicate firmware pass-through
-	PassthroughStallDetected  prometheus.Counter     // rising edges of pass-through stalls
-	PassthroughRecoveryTotal  *prometheus.CounterVec // label: outcome (nudge_started|nudge_charging_mode|nudge_schedule|unresolved_after_nudge|started|blocked_flash_guard|rate_limited|publish_error|restored)
-	SurplusFeedInToggledTotal *prometheus.CounterVec // label: direction (disable|restore)
+	AuthorityRemediationTotal *prometheus.CounterVec // labels: kind, outcome
 
 	// Scheduled device restart (opt-in; only emitted when DEVICE_RESTART_SCHEDULE is set).
 	// DeviceRestartInfo is a labeled gauge (value always 1) exposing the active
@@ -190,18 +187,15 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		BatteryTempMinCelsius:      newGauge("battery_temp_min_celsius", "Device-reported minimum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
 		BatteryTempMaxCelsius:      newGauge("battery_temp_max_celsius", "Device-reported maximum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
 
-		NearFullIdleActive:           newGauge("near_full_idle_active", "1 while the controller is suppressing discharge because SoC is in the near-full band; 0 otherwise."),
-		NearFullIdleEntered:          newCounter("near_full_idle_entered_total", "Number of times near-full idle has been activated (rising edge)."),
-		NearFullIdleEntryReasonTotal: newCounterVec("near_full_idle_entry_reason_total", "Reason-specific near-full idle entries.", []string{"reason"}),
-		NearFullIdleExited:           newCounter("near_full_idle_exited_total", "Number of times near-full idle has been deactivated (falling edge)."),
-		NearFullIdleExitReasonTotal:  newCounterVec("near_full_idle_exit_reason_total", "Reason-specific near-full idle exits.", []string{"reason"}),
+		TopChargeIdleActive:          newGauge("top_charge_idle_active", "1 while the controller is suppressing discharge so full-charge PV can pass through firmware; 0 otherwise."),
+		TopChargeIdleEntered:         newCounter("top_charge_idle_entered_total", "Number of times top-charge idle has been activated (rising edge)."),
+		TopChargeIdleExited:          newCounter("top_charge_idle_exited_total", "Number of times top-charge idle has been deactivated (falling edge)."),
+		TopChargeIdleExitReasonTotal: newCounterVec("top_charge_idle_exit_reason_total", "Reason-specific top-charge idle exits.", []string{"reason"}),
 
 		SurplusFeedInEnabled: newGauge("surplus_feed_in_enabled", "1 when the device has surplus feed-in enabled (tc_dis=0); 0 when disabled (tc_dis=1). Mirrors the device status flag."),
 
 		PassthroughActive:         newGauge("passthrough_active", "1 when device status p1/p2 indicate firmware solar pass-through mode; 0 otherwise."),
-		PassthroughStallDetected:  newCounter("passthrough_stall_detected_total", "Pass-through stall events detected on the rising edge."),
-		PassthroughRecoveryTotal:  newCounterVec("passthrough_recovery_total", "Pass-through recovery actions by outcome.", []string{"outcome"}),
-		SurplusFeedInToggledTotal: newCounterVec("surplus_feedin_toggled_total", "Automatic surplus-feed-in toggles by direction.", []string{"direction"}),
+		AuthorityRemediationTotal: newCounterVec("authority_remediation_total", "Runtime authority remediation actions by kind and outcome.", []string{"kind", "outcome"}),
 
 		// Scheduled device restart metrics. DeviceRestartInfo is a GaugeVec so
 		// that no samples are emitted when the feature is disabled (opt-in).

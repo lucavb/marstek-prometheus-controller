@@ -247,129 +247,47 @@ func TestLoad_StabilityDefaults(t *testing.T) {
 	if cfg.PrometheusTimeout != 12*time.Second {
 		t.Errorf("PrometheusTimeout default = %v, want 12s", cfg.PrometheusTimeout)
 	}
-	if cfg.NearFullIdleEntryExportWatts != 25 {
-		t.Errorf("NearFullIdleEntryExportWatts default = %d, want 25", cfg.NearFullIdleEntryExportWatts)
+	if cfg.NearFullIdleEnterPercent != 100 {
+		t.Errorf("NearFullIdleEnterPercent default = %d, want 100", cfg.NearFullIdleEnterPercent)
+	}
+	if cfg.NearFullIdleGridImportExitSamples != 4 {
+		t.Errorf("NearFullIdleGridImportExitSamples default = %d, want 4", cfg.NearFullIdleGridImportExitSamples)
+	}
+	if cfg.SurplusFeedInRecoveryMinInterval != 6*time.Hour {
+		t.Errorf("SurplusFeedInRecoveryMinInterval default = %v, want 6h", cfg.SurplusFeedInRecoveryMinInterval)
 	}
 }
 
-func TestLoad_NearFullIdleEntryExportWatts(t *testing.T) {
+func TestLoad_TopChargeIdleConfig(t *testing.T) {
 	t.Run("override", func(t *testing.T) {
 		setRequired(t)
-		t.Setenv("NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS", "40")
+		t.Setenv("NEAR_FULL_IDLE_ENTER_PERCENT", "99")
+		t.Setenv("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", "3")
+		t.Setenv("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", "30m")
 		cfg, err := config.Load()
 		if err != nil {
 			t.Fatalf("Load() unexpected error: %v", err)
 		}
-		if cfg.NearFullIdleEntryExportWatts != 40 {
-			t.Errorf("NearFullIdleEntryExportWatts = %d, want 40", cfg.NearFullIdleEntryExportWatts)
+		if cfg.NearFullIdleEnterPercent != 99 {
+			t.Errorf("NearFullIdleEnterPercent = %d, want 99", cfg.NearFullIdleEnterPercent)
+		}
+		if cfg.NearFullIdleGridImportExitSamples != 3 {
+			t.Errorf("NearFullIdleGridImportExitSamples = %d, want 3", cfg.NearFullIdleGridImportExitSamples)
+		}
+		if cfg.SurplusFeedInRecoveryMinInterval != 30*time.Minute {
+			t.Errorf("SurplusFeedInRecoveryMinInterval = %v, want 30m", cfg.SurplusFeedInRecoveryMinInterval)
 		}
 	})
 
 	t.Run("negative", func(t *testing.T) {
 		setRequired(t)
-		t.Setenv("NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS", "-1")
+		t.Setenv("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", "-1s")
 		_, err := config.Load()
 		if err == nil {
-			t.Fatal("Load() expected error for negative entry export threshold, got nil")
+			t.Fatal("Load() expected error for negative interval, got nil")
 		}
-		if !strings.Contains(err.Error(), "NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS must be >= 0") {
-			t.Errorf("error = %q, want NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS validation", err.Error())
+		if !strings.Contains(err.Error(), "SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL must be >= 0") {
+			t.Errorf("error = %q, want SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL validation", err.Error())
 		}
 	})
-}
-
-func TestLoad_PassthroughRecoveryDefaults(t *testing.T) {
-	setRequired(t)
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("Load() unexpected error: %v", err)
-	}
-	if cfg.PassthroughAutoRecovery {
-		t.Error("PassthroughAutoRecovery default = true, want false")
-	}
-	if cfg.PassthroughAutoRecoveryFlashFallback {
-		t.Error("PassthroughAutoRecoveryFlashFallback default = true, want false")
-	}
-	if cfg.PassthroughStallDetectCycles != 5 {
-		t.Errorf("PassthroughStallDetectCycles = %d, want 5", cfg.PassthroughStallDetectCycles)
-	}
-	if cfg.PassthroughStallMinCommandWatts != cfg.MinOutputWatts {
-		t.Errorf("PassthroughStallMinCommandWatts = %d, want MinOutputWatts %d", cfg.PassthroughStallMinCommandWatts, cfg.MinOutputWatts)
-	}
-}
-
-func TestLoad_PassthroughRecoveryAllowsFlashGuardToBeEnabledSeparately(t *testing.T) {
-	setRequired(t)
-	t.Setenv("PASSTHROUGH_AUTO_RECOVERY", "true")
-
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("Load() unexpected error: %v", err)
-	}
-	if !cfg.PassthroughAutoRecovery {
-		t.Error("PassthroughAutoRecovery = false, want true")
-	}
-	if cfg.AllowFlashWrites {
-		t.Error("AllowFlashWrites should remain false unless ALLOW_FLASH_WRITES is explicitly set")
-	}
-}
-
-func TestLoad_PassthroughRecoveryFlashFallbackRequiresAutoRecovery(t *testing.T) {
-	setRequired(t)
-	t.Setenv("PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK", "true")
-
-	_, err := config.Load()
-	if err == nil {
-		t.Fatal("Load() expected error when flash fallback enabled without auto recovery")
-	}
-	if !strings.Contains(err.Error(), "PASSTHROUGH_AUTO_RECOVERY_FLASH_FALLBACK=true requires PASSTHROUGH_AUTO_RECOVERY=true") {
-		t.Fatalf("error = %q, want flash fallback dependency validation", err.Error())
-	}
-}
-
-func TestLoad_PassthroughRecoveryRejectsNegativeValues(t *testing.T) {
-	cases := []struct {
-		name    string
-		envKey  string
-		value   string
-		wantMsg string
-	}{
-		{
-			name:    "detect cycles",
-			envKey:  "PASSTHROUGH_STALL_DETECT_CYCLES",
-			value:   "-1",
-			wantMsg: "PASSTHROUGH_STALL_DETECT_CYCLES must be >= 0",
-		},
-		{
-			name:    "min command watts",
-			envKey:  "PASSTHROUGH_STALL_MIN_COMMAND_WATTS",
-			value:   "-1",
-			wantMsg: "PASSTHROUGH_STALL_MIN_COMMAND_WATTS must be >= 0",
-		},
-		{
-			name:    "min interval",
-			envKey:  "PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL",
-			value:   "-1s",
-			wantMsg: "PASSTHROUGH_AUTO_RECOVERY_MIN_INTERVAL must be >= 0",
-		},
-		{
-			name:    "restore delay",
-			envKey:  "PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY",
-			value:   "-1s",
-			wantMsg: "PASSTHROUGH_AUTO_RECOVERY_RESTORE_DELAY must be >= 0",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			setRequired(t)
-			t.Setenv(tc.envKey, tc.value)
-			_, err := config.Load()
-			if err == nil {
-				t.Fatal("Load() expected error for negative value, got nil")
-			}
-			if !strings.Contains(err.Error(), tc.wantMsg) {
-				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.wantMsg)
-			}
-		})
-	}
 }
