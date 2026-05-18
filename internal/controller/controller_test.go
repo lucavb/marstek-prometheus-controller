@@ -2449,7 +2449,7 @@ func TestStep_NearFullIdle_EntersAtFullWithSolarSurplus(t *testing.T) {
 	}
 }
 
-func TestStep_NearFullIdle_EntersOnDebouncedPassthroughAtFullSoC(t *testing.T) {
+func TestStep_NearFullIdle_DoesNotEnterOnPassthroughDuringImportWithoutRecentExport(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
@@ -2458,21 +2458,46 @@ func TestStep_NearFullIdle_EntersOnDebouncedPassthroughAtFullSoC(t *testing.T) {
 	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Pass-through at full SoC is valid surplus evidence even while the meter
-	// still shows import. The signal must still satisfy the normal debounce.
-	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+	// fw116 can pulse pass-through while the apartment is still importing.
+	// Without a recent real export sample, that alone must not arm idle.
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples+1; i++ {
 		p.set(160, 0)
 		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
 		_ = c.Step(context.Background())
 	}
 
 	last := pub.last()
-	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
-		t.Fatalf("debounced pass-through at full SOC should enter near-full idle even without stable export; got %q", last)
+	if strings.Contains(last, ",a1=0,") || strings.Contains(last, ",v1=0,") {
+		t.Fatalf("pass-through during sustained import without recent export must not enter near-full idle; got %q", last)
 	}
 }
 
-func TestStep_NearFullIdle_StopsFullSoCChatterAfterPassthroughEntry(t *testing.T) {
+func TestStep_NearFullIdle_EntersOnPassthroughAfterRecentExportAtFullSoC(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// One meaningful export sample seeds the recent-export evidence. The
+	// following pass-through import sample should then complete the debounce and
+	// enter idle instead of forcing a second consecutive export cycle.
+	p.set(-50, 0)
+	st.setFresh(devStatusAtSoC(100, 300, 300, 0, 0))
+	_ = c.Step(context.Background())
+
+	p.set(166, 0)
+	st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
+	_ = c.Step(context.Background())
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Fatalf("recent export plus pass-through at full SOC should enter near-full idle; got %q", last)
+	}
+}
+
+func TestStep_NearFullIdle_StopsFullSoCChatterAfterRecentExportPassthroughEntry(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
 	st := &fakeStatus{}
@@ -2482,23 +2507,19 @@ func TestStep_NearFullIdle_StopsFullSoCChatterAfterPassthroughEntry(t *testing.T
 	cfg.PassthroughStallDetectCycles = 0
 	c := controller.New(cfg, p, pub, st, clk, nil)
 
-	// Reproduce the start of the live failure mode: SoC is pinned at 100%,
-	// pass-through is active, and the controller would otherwise keep toggling
-	// between a non-zero slot command and zero as the grid reading swings.
-	p.set(171, 0)
-	st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
+	// Reproduce the live pattern with a brief export pulse, then let
+	// pass-through finish arming idle. This is the case the production fix is
+	// meant to absorb without disabling discharge during pure import.
+	p.set(-254, 0)
+	st.setFresh(devStatusAtSoC(100, 300, 300, 0, 0))
 	_ = c.Step(context.Background())
-	first := pub.last()
-	if strings.Contains(first, ",a1=0,") {
-		t.Fatalf("precondition: idle must still be debounced on the first pass-through sample; got %q", first)
-	}
 
-	p.set(166, 0)
+	p.set(174, 0)
 	st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
 	_ = c.Step(context.Background())
 	entryPayload := pub.last()
 	if !strings.Contains(entryPayload, ",a1=0,") || !strings.Contains(entryPayload, ",v1=0,") {
-		t.Fatalf("second pass-through sample should enter near-full idle and disable the slot; got %q", entryPayload)
+		t.Fatalf("recent export followed by pass-through should enter near-full idle and disable the slot; got %q", entryPayload)
 	}
 	countAfterEntry := pub.count()
 

@@ -256,6 +256,22 @@ func (c *Controller) Step(ctx context.Context) error {
 		if requiredSamples < 1 {
 			requiredSamples = 1
 		}
+		entryExportThreshold := float64(c.cfg.NearFullIdleEntryExportWatts)
+		highSoC := devStatus.SOCPercent >= c.cfg.NearFullIdleEnterPercent
+		if highSoC && smoothed <= -entryExportThreshold {
+			c.lastNearFullIdleExportAt = now
+		}
+		exportLookbackSamples := c.cfg.NearFullIdleGridImportExitSamples
+		if exportLookbackSamples < requiredSamples {
+			exportLookbackSamples = requiredSamples
+		}
+		if exportLookbackSamples < 1 {
+			exportLookbackSamples = 1
+		}
+		exportLookback := time.Duration(exportLookbackSamples) * c.cfg.ControlInterval
+		if exportLookback <= 0 {
+			exportLookback = time.Duration(requiredSamples) * 15 * time.Second
+		}
 		if !c.nearFullIdleActive {
 			// Idle entry requires both high SoC AND valid surplus evidence. The
 			// grid gate breaks the flap the SoC-only check allowed: after a
@@ -265,12 +281,13 @@ func (c *Controller) Step(ctx context.Context) error {
 			// Requiring export beyond a threshold means "we genuinely have
 			// surplus to feed back"; tiny meter noise around zero should not
 			// disable discharge. Firmware pass-through in the near-full band is
-			// also valid surplus evidence: the device is already routing solar
-			// through its own path, so timed discharge should get out of the way.
-			entryExportThreshold := float64(c.cfg.NearFullIdleEntryExportWatts)
-			highSoC := devStatus.SOCPercent >= c.cfg.NearFullIdleEnterPercent
+			// only accepted as supporting evidence when the controller has seen a
+			// recent meaningful export sample; on fw116 pass-through can pulse
+			// during pure import, which would otherwise disable discharge while
+			// the house is still drawing from the grid.
 			entryByExport := smoothed <= -entryExportThreshold
-			entryByPassthrough := passThroughActive
+			recentExportSeen := !c.lastNearFullIdleExportAt.IsZero() && now.Sub(c.lastNearFullIdleExportAt) <= exportLookback
+			entryByPassthrough := passThroughActive && recentExportSeen
 			if highSoC && (entryByExport || entryByPassthrough) {
 				c.nearFullIdleEnterSamples++
 			} else {
@@ -301,6 +318,7 @@ func (c *Controller) Step(ctx context.Context) error {
 					"entry_export_watts", c.cfg.NearFullIdleEntryExportWatts,
 					"smoothed_grid_watts", math.Round(smoothed),
 					"passthrough_active", passThroughActive,
+					"recent_export_seen", recentExportSeen,
 					"surplus_feed_in", devStatus.SurplusFeedIn)
 			}
 		} else {

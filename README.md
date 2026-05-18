@@ -94,17 +94,20 @@ explicit.)
 **Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `98`)
 **and** either smoothed grid export at or beyond
 `NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS` (default `25`) **or** firmware pass-through
-reported in device status (`p1`/`p2` bit 1 set), for
+reported in device status (`p1`/`p2` bit 1 set) **after a recent meaningful
+export sample**, for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) consecutive control cycles.
 The grid-surplus gate is what prevents the post-`grid_import`-exit flap: on
 the LFP 100% plateau SoC does not drop for many minutes after a secondary
 exit, so a SoC-only entry counter would re-arm in two cycles and put idle
 back on while the grid was still importing. Requiring meaningful export means
 "we actually have surplus to feed back"; tiny meter noise around zero resets
-the entry counter instead of disabling discharge. Pass-through is also treated
-as valid surplus evidence in the near-full band because the device is already
-handling the solar path there; without that signal the controller can stay in
-normal mode and chatter between non-zero timed discharge and zero at 100% SoC.
+the entry counter instead of disabling discharge. Pass-through is treated as a
+supporting signal in the near-full band because the device is already handling
+the solar path there, but it is only trusted when a real export happened
+recently; on fw116 pass-through can pulse during pure import, and using it
+alone would disable discharge while the apartment is still drawing from the
+grid.
 
 **Exit (debounced):** `SoC < NEAR_FULL_IDLE_EXIT_PERCENT` (default `95`) for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive control cycles. Normal

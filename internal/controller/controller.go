@@ -151,6 +151,11 @@ type Controller struct {
 	// SoC-deadlock when solar drops below house load while the battery sits
 	// at full charge.
 	nearFullIdleGridImportSamples int
+	// lastNearFullIdleExportAt records the most recent meaningful export sample
+	// seen in the near-full band. Firmware pass-through alone is too noisy on
+	// fw116 to arm idle; we only trust it as a supporting signal when a real
+	// export happened recently.
+	lastNearFullIdleExportAt time.Time
 
 	// transientZeroFiredLastCycle prevents the transient-zero-output guard from
 	// holding for more than one consecutive cycle.
