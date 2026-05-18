@@ -78,7 +78,7 @@ in the top SoC band — it disables the controlled discharge slot entirely and
 lets the firmware handle excess PV via its own surplus feed-in path
 (`tc_dis=0`).
 
-Near-full idle is SoC-driven and grid-gated on entry. While idle is active the
+Near-full idle is SoC-driven and gated on valid surplus evidence. While idle is active the
 controller publishes a schedule with the slot disabled (`a<N>=0`, `v<N>=0`) and
 otherwise gets out of the way:
 
@@ -92,15 +92,19 @@ engage. (In practice the two ranges don't overlap, but the precedence is
 explicit.)
 
 **Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `98`)
-**and** smoothed grid export at or beyond
-`NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS` (default `25`) for
+**and** either smoothed grid export at or beyond
+`NEAR_FULL_IDLE_ENTRY_EXPORT_WATTS` (default `25`) **or** firmware pass-through
+reported in device status (`p1`/`p2` bit 1 set), for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) consecutive control cycles.
 The grid-surplus gate is what prevents the post-`grid_import`-exit flap: on
 the LFP 100% plateau SoC does not drop for many minutes after a secondary
 exit, so a SoC-only entry counter would re-arm in two cycles and put idle
 back on while the grid was still importing. Requiring meaningful export means
 "we actually have surplus to feed back"; tiny meter noise around zero resets
-the entry counter instead of disabling discharge.
+the entry counter instead of disabling discharge. Pass-through is also treated
+as valid surplus evidence in the near-full band because the device is already
+handling the solar path there; without that signal the controller can stay in
+normal mode and chatter between non-zero timed discharge and zero at 100% SoC.
 
 **Exit (debounced):** `SoC < NEAR_FULL_IDLE_EXIT_PERCENT` (default `95`) for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` consecutive control cycles. Normal
@@ -359,6 +363,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `command_suppressed_total`         | Counter   | `reason`    | Suppressed commands (`deadband`, `delta`, `hold_time`, `disconnected`, `status_stale`, `soc_floor`, `transient_zero_output`, `near_full_idle`) |
 | `fallback_total`                   | Counter   | `reason`    | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error)                                                      |
 | `near_full_idle_entered_total`     | Counter   |             | Times the near-full idle regime has been activated (rising edge)                                                                               |
+| `near_full_idle_entry_reason_total`| Counter   | `reason`    | Reason-specific entries into near-full idle (`export`, `passthrough`, `mixed`)                                                                 |
 | `near_full_idle_exited_total`      | Counter   |             | Times the near-full idle regime has been deactivated (falling edge)                                                                            |
 | `near_full_idle_exit_reason_total` | Counter   | `reason`    | Reason-specific exits from near-full idle (`soc_exit`, `grid_import`, `fallback`, `surplus_feed_in_disabled`, `disabled`)                      |
 | `passthrough_stall_detected_total` | Counter   |             | Full-SOC pass-through stalls detected on the rising edge                                                                                       |

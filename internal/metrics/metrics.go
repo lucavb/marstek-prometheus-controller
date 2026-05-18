@@ -61,10 +61,11 @@ type Metrics struct {
 	BatteryTempMaxCelsius      prometheus.Gauge // device-reported max cell temp (th); observability only
 
 	// Near-full idle regime state
-	NearFullIdleActive          prometheus.Gauge       // 1 while the controller is suppressing discharge near full charge
-	NearFullIdleEntered         prometheus.Counter     // incremented on each rising edge (inactive → active)
-	NearFullIdleExited          prometheus.Counter     // incremented on each falling edge (active → inactive)
-	NearFullIdleExitReasonTotal *prometheus.CounterVec // label: reason (soc_exit, grid_import, fallback, surplus_feed_in_disabled, disabled)
+	NearFullIdleActive           prometheus.Gauge       // 1 while the controller is suppressing discharge near full charge
+	NearFullIdleEntered          prometheus.Counter     // incremented on each rising edge (inactive → active)
+	NearFullIdleEntryReasonTotal *prometheus.CounterVec // label: reason (export, passthrough, mixed)
+	NearFullIdleExited           prometheus.Counter     // incremented on each falling edge (active → inactive)
+	NearFullIdleExitReasonTotal  *prometheus.CounterVec // label: reason (soc_exit, grid_import, fallback, surplus_feed_in_disabled, disabled)
 
 	// Device feed-in flag mirrored from device status (tc_dis)
 	SurplusFeedInEnabled prometheus.Gauge // 1 when tc_dis=0 (feed-in enabled), 0 when tc_dis=1
@@ -189,10 +190,11 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		BatteryTempMinCelsius:      newGauge("battery_temp_min_celsius", "Device-reported minimum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
 		BatteryTempMaxCelsius:      newGauge("battery_temp_max_celsius", "Device-reported maximum cell temperature (°C). Observability only; the BMS enforces thermal limits."),
 
-		NearFullIdleActive:          newGauge("near_full_idle_active", "1 while the controller is suppressing discharge because SoC is in the near-full band; 0 otherwise."),
-		NearFullIdleEntered:         newCounter("near_full_idle_entered_total", "Number of times near-full idle has been activated (rising edge)."),
-		NearFullIdleExited:          newCounter("near_full_idle_exited_total", "Number of times near-full idle has been deactivated (falling edge)."),
-		NearFullIdleExitReasonTotal: newCounterVec("near_full_idle_exit_reason_total", "Reason-specific near-full idle exits.", []string{"reason"}),
+		NearFullIdleActive:           newGauge("near_full_idle_active", "1 while the controller is suppressing discharge because SoC is in the near-full band; 0 otherwise."),
+		NearFullIdleEntered:          newCounter("near_full_idle_entered_total", "Number of times near-full idle has been activated (rising edge)."),
+		NearFullIdleEntryReasonTotal: newCounterVec("near_full_idle_entry_reason_total", "Reason-specific near-full idle entries.", []string{"reason"}),
+		NearFullIdleExited:           newCounter("near_full_idle_exited_total", "Number of times near-full idle has been deactivated (falling edge)."),
+		NearFullIdleExitReasonTotal:  newCounterVec("near_full_idle_exit_reason_total", "Reason-specific near-full idle exits.", []string{"reason"}),
 
 		SurplusFeedInEnabled: newGauge("surplus_feed_in_enabled", "1 when the device has surplus feed-in enabled (tc_dis=0); 0 when disabled (tc_dis=1). Mirrors the device status flag."),
 

@@ -2449,6 +2449,86 @@ func TestStep_NearFullIdle_EntersAtFullWithSolarSurplus(t *testing.T) {
 	}
 }
 
+func TestStep_NearFullIdle_EntersOnDebouncedPassthroughAtFullSoC(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Pass-through at full SoC is valid surplus evidence even while the meter
+	// still shows import. The signal must still satisfy the normal debounce.
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(160, 0)
+		st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
+		_ = c.Step(context.Background())
+	}
+
+	last := pub.last()
+	if !strings.Contains(last, ",a1=0,") || !strings.Contains(last, ",v1=0,") {
+		t.Fatalf("debounced pass-through at full SOC should enter near-full idle even without stable export; got %q", last)
+	}
+}
+
+func TestStep_NearFullIdle_StopsFullSoCChatterAfterPassthroughEntry(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 0
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// Reproduce the start of the live failure mode: SoC is pinned at 100%,
+	// pass-through is active, and the controller would otherwise keep toggling
+	// between a non-zero slot command and zero as the grid reading swings.
+	p.set(171, 0)
+	st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
+	_ = c.Step(context.Background())
+	first := pub.last()
+	if strings.Contains(first, ",a1=0,") {
+		t.Fatalf("precondition: idle must still be debounced on the first pass-through sample; got %q", first)
+	}
+
+	p.set(166, 0)
+	st.setFresh(devStatusAtSoCPassThrough(100, 300, 300, 0, 0))
+	_ = c.Step(context.Background())
+	entryPayload := pub.last()
+	if !strings.Contains(entryPayload, ",a1=0,") || !strings.Contains(entryPayload, ",v1=0,") {
+		t.Fatalf("second pass-through sample should enter near-full idle and disable the slot; got %q", entryPayload)
+	}
+	countAfterEntry := pub.count()
+
+	// Once idle is active and the device echoes the disabled slot, alternating
+	// import/export spikes should no longer cause schedule chatter. The import
+	// streak is intentionally broken by export samples so the grid_import exit
+	// cannot accumulate.
+	cycles := []struct {
+		grid   float64
+		status marstek.Status
+	}{
+		{-250, withControlledSlot(devStatusAtSoC(100, 300, 300, 0, 0), false, 0)},
+		{174, withControlledSlot(devStatusAtSoCPassThrough(100, 300, 300, 0, 0), false, 0)},
+		{166, withControlledSlot(devStatusAtSoC(100, 300, 300, 0, 0), false, 0)},
+		{170, withControlledSlot(devStatusAtSoCPassThrough(100, 300, 300, 0, 0), false, 0)},
+		{-254, withControlledSlot(devStatusAtSoC(100, 300, 300, 0, 0), false, 0)},
+		{178, withControlledSlot(devStatusAtSoCPassThrough(100, 300, 300, 0, 0), false, 0)},
+		{162, withControlledSlot(devStatusAtSoC(100, 300, 300, 0, 0), false, 0)},
+	}
+	for i, cycle := range cycles {
+		p.set(cycle.grid, 0)
+		st.setFresh(cycle.status)
+		_ = c.Step(context.Background())
+		if pub.count() != countAfterEntry {
+			t.Fatalf("cycle %d: near-full idle should absorb full-SOC chatter after pass-through entry; got %d publishes, want %d (last %q)",
+				i, pub.count(), countAfterEntry, pub.last())
+		}
+	}
+}
+
 func TestStep_NearFullIdle_StaysInPassthroughWhenSolarCoversLoad(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}

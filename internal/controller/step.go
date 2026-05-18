@@ -230,7 +230,7 @@ func (c *Controller) Step(ctx context.Context) error {
 	// recover an ignored discharge command, but it must not keep intentional
 	// idle active during sustained grid import.
 	//
-	// Entry is gated on meaningful export in addition to SoC, so after a
+	// Entry is gated on valid surplus evidence in addition to SoC, so after a
 	// grid_import exit the enter counter cannot re-arm while the grid is still
 	// importing or merely wobbling around zero on the LFP plateau (the SoC-only
 	// gate flapped idle back on within two cycles; see the 2026-04 incident).
@@ -257,21 +257,33 @@ func (c *Controller) Step(ctx context.Context) error {
 			requiredSamples = 1
 		}
 		if !c.nearFullIdleActive {
-			// Idle entry requires both high SoC AND meaningful grid export. The
+			// Idle entry requires both high SoC AND valid surplus evidence. The
 			// grid gate breaks the flap the SoC-only check allowed: after a
 			// grid_import exit, SoC is still pinned at the enter threshold on
 			// the LFP plateau, so a SoC-only counter re-fires in two cycles
 			// and idle flaps right back on while the grid is still importing.
 			// Requiring export beyond a threshold means "we genuinely have
 			// surplus to feed back"; tiny meter noise around zero should not
-			// disable discharge.
+			// disable discharge. Firmware pass-through in the near-full band is
+			// also valid surplus evidence: the device is already routing solar
+			// through its own path, so timed discharge should get out of the way.
 			entryExportThreshold := float64(c.cfg.NearFullIdleEntryExportWatts)
-			if devStatus.SOCPercent >= c.cfg.NearFullIdleEnterPercent && smoothed <= -entryExportThreshold {
+			highSoC := devStatus.SOCPercent >= c.cfg.NearFullIdleEnterPercent
+			entryByExport := smoothed <= -entryExportThreshold
+			entryByPassthrough := passThroughActive
+			if highSoC && (entryByExport || entryByPassthrough) {
 				c.nearFullIdleEnterSamples++
 			} else {
 				c.nearFullIdleEnterSamples = 0
 			}
 			if c.nearFullIdleEnterSamples >= requiredSamples {
+				entryReason := "export"
+				switch {
+				case entryByExport && entryByPassthrough:
+					entryReason = "mixed"
+				case entryByPassthrough:
+					entryReason = "passthrough"
+				}
 				c.nearFullIdleActive = true
 				c.nearFullIdleEnterSamples = 0
 				c.nearFullIdleExitSamples = 0
@@ -279,13 +291,16 @@ func (c *Controller) Step(ctx context.Context) error {
 				if c.m != nil {
 					c.m.NearFullIdleActive.Set(1)
 					c.m.NearFullIdleEntered.Inc()
+					c.m.NearFullIdleEntryReasonTotal.WithLabelValues(entryReason).Inc()
 				}
 				slog.Info("near-full idle activated",
 					"soc_pct", devStatus.SOCPercent,
 					"enter_pct", c.cfg.NearFullIdleEnterPercent,
 					"exit_pct", c.cfg.NearFullIdleExitPercent,
+					"entry_reason", entryReason,
 					"entry_export_watts", c.cfg.NearFullIdleEntryExportWatts,
 					"smoothed_grid_watts", math.Round(smoothed),
+					"passthrough_active", passThroughActive,
 					"surplus_feed_in", devStatus.SurplusFeedIn)
 			}
 		} else {
