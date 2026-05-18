@@ -138,6 +138,11 @@ func run() error {
 		NearFullIdleGridImportExitSamples: cfg.NearFullIdleGridImportExitSamples,
 
 		SurplusFeedInRecoveryMinInterval: cfg.SurplusFeedInRecoveryMinInterval,
+
+		NuclearRestartEnabled:         cfg.NuclearRestartEnabled,
+		NuclearRestartAckWiFiRecovery: cfg.NuclearRestartAckWiFiRecovery,
+		NuclearRestartBlockedCycles:   cfg.NuclearRestartBlockedCycles,
+		NuclearRestartMinInterval:     cfg.NuclearRestartMinInterval,
 	}
 
 	ctrl := controller.New(ctrlCfg, prom, mqtt, statusSrc, nil, m)

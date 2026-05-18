@@ -387,6 +387,195 @@ func TestStep_AuthorityUnblocksOutputsAfterSustainedZeroOutput(t *testing.T) {
 	}
 }
 
+func TestStep_NuclearRestartDisabledByDefault(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.NuclearRestartBlockedCycles = 3
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	p.set(200, 0)
+	for i := 0; i < 8; i++ {
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.countContaining("cd=10"); got != 0 {
+		t.Fatalf("nuclear restart must be disabled by default, got %d restart publishes", got)
+	}
+}
+
+func TestStep_NuclearRestartPublishesAfterSustainedBlockedOutput(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.NuclearRestartEnabled = true
+	cfg.NuclearRestartAckWiFiRecovery = true
+	cfg.NuclearRestartBlockedCycles = 4
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	p.set(200, 0)
+	for i := 0; i < 5; i++ {
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.last(); got != "cd=10" {
+		t.Fatalf("expected nuclear restart payload, got %q", got)
+	}
+	if got := pub.countContaining("cd=18,md=3"); got == 0 {
+		t.Fatalf("expected output-enable remediation before nuclear restart")
+	}
+}
+
+func TestStep_NuclearRestartRequiresOutputEnableAttempt(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.NuclearRestartEnabled = true
+	cfg.NuclearRestartAckWiFiRecovery = true
+	cfg.NuclearRestartBlockedCycles = 1
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	p.set(200, 0)
+	for i := 0; i < 2; i++ {
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.countContaining("cd=10"); got != 0 {
+		t.Fatalf("restart must wait until output-enable has been attempted, got %d restart publishes", got)
+	}
+}
+
+func TestStep_NuclearRestartDoesNotRunDuringExport(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.NuclearRestartEnabled = true
+	cfg.NuclearRestartAckWiFiRecovery = true
+	cfg.NuclearRestartBlockedCycles = 3
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	p.set(-100, 0)
+	for i := 0; i < 6; i++ {
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.countContaining("cd=10"); got != 0 {
+		t.Fatalf("restart must not run during export, got %d restart publishes", got)
+	}
+}
+
+func TestStep_NuclearRestartDoesNotRunDuringTopChargeIdle(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.NuclearRestartEnabled = true
+	cfg.NuclearRestartAckWiFiRecovery = true
+	cfg.NuclearRestartBlockedCycles = 2
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples+4; i++ {
+		p.set(0, 0)
+		status := passThroughStatus(100, 300, 300, 120, 120, true)
+		if i > 0 {
+			status = withControlledSlot(status, true, 240)
+		}
+		st.setFresh(status)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.countContaining("cd=10"); got != 0 {
+		t.Fatalf("restart must not run during top-charge idle, got %d restart publishes", got)
+	}
+}
+
+func TestStep_NuclearRestartDoesNotRunBelowSoCFloor(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.NuclearRestartEnabled = true
+	cfg.NuclearRestartAckWiFiRecovery = true
+	cfg.NuclearRestartBlockedCycles = 2
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	p.set(200, 0)
+	for i := 0; i < 6; i++ {
+		st.setFresh(withControlledSlot(statusWith(10, 0, 0, 0, 0, true), true, 200))
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.countContaining("cd=10"); got != 0 {
+		t.Fatalf("restart must not run below SoC floor, got %d restart publishes", got)
+	}
+}
+
+func TestStep_NuclearRestartRateLimited(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.NuclearRestartEnabled = true
+	cfg.NuclearRestartAckWiFiRecovery = true
+	cfg.NuclearRestartBlockedCycles = 3
+	cfg.NuclearRestartMinInterval = time.Hour
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	p.set(200, 0)
+	for i := 0; i < 10; i++ {
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.countContaining("cd=10"); got != 1 {
+		t.Fatalf("expected exactly one rate-limited restart, got %d", got)
+	}
+}
+
 func TestStep_TopChargeIdleEntersOnlyAtFullWithSurplusEvidence(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}

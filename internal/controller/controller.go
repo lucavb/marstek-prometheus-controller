@@ -71,6 +71,14 @@ type Config struct {
 	// Surplus feed-in authority. The device exposes this as a persistent setting,
 	// so automatic remediation is gated by AllowFlashWrites and rate-limited.
 	SurplusFeedInRecoveryMinInterval time.Duration
+
+	// Nuclear restart recovery. This is a deliberately opt-in last resort for a
+	// device that accepted runtime commands but still contributes no battery
+	// output. cd=10 can drop WiFi, so config requires an explicit recovery ack.
+	NuclearRestartEnabled         bool
+	NuclearRestartAckWiFiRecovery bool
+	NuclearRestartBlockedCycles   int
+	NuclearRestartMinInterval     time.Duration
 }
 
 // Controller is the main control loop.
@@ -119,6 +127,9 @@ type Controller struct {
 
 	lastSurplusFeedInRecoveryAt time.Time
 	loggedSurplusFeedInBlocked  bool
+	lastOutputEnableAttemptAt   time.Time
+	lastNuclearRestartAt        time.Time
+	loggedNuclearRestartBlocked bool
 }
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil

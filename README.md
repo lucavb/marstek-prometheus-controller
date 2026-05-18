@@ -160,6 +160,10 @@ All settings are environment variables:
 | `SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL`    | `6h`                       | Minimum time between automatic `cd=31,touchuan_disa=0` surplus-feed-in re-enable writes. The write is still gated by `ALLOW_FLASH_WRITES=true`.                                                                                                                  |
 | `DEVICE_RESTART_SCHEDULE`                 | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4` * * * for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart).                                     |
 | `DEVICE_RESTART_TIMEZONE`                 | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty.                                                                                                                                         |
+| `NUCLEAR_RESTART_ENABLED`                 | `false`                    | **Dangerous opt-in.** Allow stuck-inverter recovery to publish `cd=10` only after sustained blocked-output evidence and normal authority remediation. See [Nuclear restart recovery](#nuclear-restart-recovery).                                                   |
+| `NUCLEAR_RESTART_ACK_WIFI_RECOVERY`       | `false`                    | Required acknowledgement when `NUCLEAR_RESTART_ENABLED=true`. This confirms you understand restart can drop WiFi and that you have an app/BLE/smart-plug/ESP32 recovery path.                                                                                      |
+| `NUCLEAR_RESTART_BLOCKED_CYCLES`          | `6`                        | Consecutive blocked-output cycles required before nuclear restart recovery can fire. Must be ≥ 1.                                                                                                                                                                  |
+| `NUCLEAR_RESTART_MIN_INTERVAL`            | `6h`                       | Minimum time between nuclear restart commands. Must be ≥ 0.                                                                                                                                                                                                        |
 
 
 ## Scheduled device restart
@@ -192,6 +196,35 @@ For zones with daylight saving time, avoid scheduling during the `02:00–03:00`
 | `marstek_controller_device_restarts_total{outcome}`        | Restart commands by outcome: `sent`, `skipped_not_connected`, `publish_error`. |
 | `marstek_controller_last_device_restart_timestamp_seconds` | Unix timestamp of the last successful restart command.                         |
 | `marstek_controller_next_device_restart_timestamp_seconds` | Unix timestamp of the next scheduled fire.                                     |
+
+
+## Nuclear restart recovery
+
+> **Danger: disabled by default. `cd=10` can make the battery disappear from WiFi until manual app/BLE recovery or an external recovery device brings it back.**
+
+This feature is a last-resort stuck-inverter recovery path for the failure mode where `cd=17`, `cd=18`, and `cd=20` are accepted, the controlled slot is armed, grid import remains meaningful, but device status still shows zero battery contribution for multiple control cycles.
+
+Do not enable this unless you have a recovery path for the battery rejoining WiFi. Acceptable paths include app access, BLE `set-wifi`, a smart plug/cold power cycle setup you have tested, or preferably the ESP32 bridge from [`prometheus-marstek-mqtt-exporter` Optional ESP32 recovery](https://github.com/lucavb/prometheus-marstek-mqtt-exporter#optional-esp32-recovery). That exporter-side MicroPython bridge can observe battery connectivity and, when configured with `MARSTEK_BATTERY_WIFI_SSID` and `MARSTEK_BATTERY_WIFI_PASSWORD`, post WiFi credentials back to the battery.
+
+Configuration requires a double opt-in:
+
+```bash
+NUCLEAR_RESTART_ENABLED=true
+NUCLEAR_RESTART_ACK_WIFI_RECOVERY=true
+NUCLEAR_RESTART_BLOCKED_CYCLES=6
+NUCLEAR_RESTART_MIN_INTERVAL=6h
+```
+
+`NUCLEAR_RESTART_ACK_WIFI_RECOVERY=true` is an explicit acknowledgement, not a safety mechanism. If the restart drops WiFi and nothing else can rejoin it, the controller will lose the device until someone recovers it manually.
+
+The nuclear path is separate from `DEVICE_RESTART_SCHEDULE`. It only runs from the authority phase, after normal charging-mode, slot, and output-enable remediation has already had a chance, and it is suppressed during fallback, export, top-charge idle, SoC-floor idle, stale-status paths, or while rate-limited.
+
+Metrics:
+
+| Metric                                                            | Description                                                                                                                                                                                                          |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `marstek_controller_nuclear_restart_total{outcome}`               | Restart recovery outcomes: `wifi_ack_missing`, `disabled`, `blocked_evidence_insufficient`, `rate_limited`, `mqtt_not_connected`, `publish_error`, `restart_command_published`.                                    |
+| `marstek_controller_last_nuclear_restart_timestamp_seconds`       | Unix timestamp of the last successful nuclear restart command; `0` if never sent.                                                                                                                                    |
 
 
 ## Deployment
@@ -306,6 +339,8 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `top_charge_idle_exited_total`     | Counter   |             | Times top-charge idle has been deactivated (falling edge)                                                                                      |
 | `top_charge_idle_exit_reason_total`| Counter   | `reason`    | Reason-specific exits from top-charge idle (`soc_exit`, `grid_import`, `fallback`, `surplus_feed_in_disabled`, `disabled`, `soc_floor`)        |
 | `authority_remediation_total`      | Counter   | `kind`,`outcome` | Authority remediation actions such as `charging_mode`, `controlled_slot`, `output_enable`, and `surplus_feed_in`                           |
+| `nuclear_restart_total`            | Counter   | `outcome`   | Nuclear stuck-inverter restart recovery outcomes                                                                                               |
+| `last_nuclear_restart_timestamp_seconds` | Gauge |             | Unix timestamp of the last successful nuclear restart command                                                                                  |
 | `control_loop_duration_seconds`    | Histogram |             | Wall time per control cycle                                                                                                                    |
 
 

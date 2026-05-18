@@ -74,12 +74,16 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.ready = true
 		c.resetTopChargeIdleState("soc_floor")
 		c.outputBlockedCycles = 0
+		c.lastOutputEnableAttemptAt = time.Time{}
+		c.loggedNuclearRestartBlocked = false
 		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "soc_floor")
 	}
 
 	if c.updateTopChargeIdle(devStatus, smoothed) {
 		c.ready = true
 		c.outputBlockedCycles = 0
+		c.lastOutputEnableAttemptAt = time.Time{}
+		c.loggedNuclearRestartBlocked = false
 		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "top_charge_idle")
 	}
 
@@ -87,7 +91,7 @@ func (c *Controller) Step(ctx context.Context) error {
 	if c.m != nil {
 		c.m.TargetSlotPowerWatts.Set(float64(rawTarget))
 	}
-	if handled, err := c.maybeEnsureOutputEnabled(now, devStatus, rawTarget); err != nil {
+	if handled, err := c.maybeEnsureOutputEnabled(now, devStatus, rawTarget, smoothed); err != nil {
 		return err
 	} else if handled {
 		c.ready = true

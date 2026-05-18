@@ -291,3 +291,94 @@ func TestLoad_TopChargeIdleConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestLoad_NuclearRestartDefaultsDisabled(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.NuclearRestartEnabled {
+		t.Error("NuclearRestartEnabled default = true, want false")
+	}
+	if cfg.NuclearRestartAckWiFiRecovery {
+		t.Error("NuclearRestartAckWiFiRecovery default = true, want false")
+	}
+	if cfg.NuclearRestartBlockedCycles != 6 {
+		t.Errorf("NuclearRestartBlockedCycles = %d, want 6", cfg.NuclearRestartBlockedCycles)
+	}
+	if cfg.NuclearRestartMinInterval != 6*time.Hour {
+		t.Errorf("NuclearRestartMinInterval = %v, want 6h", cfg.NuclearRestartMinInterval)
+	}
+}
+
+func TestLoad_NuclearRestartRequiresWiFiRecoveryAck(t *testing.T) {
+	setRequired(t)
+	t.Setenv("NUCLEAR_RESTART_ENABLED", "true")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() expected error when nuclear restart enabled without WiFi recovery ack")
+	}
+	if !strings.Contains(err.Error(), "NUCLEAR_RESTART_ACK_WIFI_RECOVERY") {
+		t.Fatalf("error = %q, want WiFi recovery acknowledgement validation", err.Error())
+	}
+}
+
+func TestLoad_NuclearRestartWithAck(t *testing.T) {
+	setRequired(t)
+	t.Setenv("NUCLEAR_RESTART_ENABLED", "true")
+	t.Setenv("NUCLEAR_RESTART_ACK_WIFI_RECOVERY", "true")
+	t.Setenv("NUCLEAR_RESTART_BLOCKED_CYCLES", "8")
+	t.Setenv("NUCLEAR_RESTART_MIN_INTERVAL", "45m")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if !cfg.NuclearRestartEnabled {
+		t.Error("NuclearRestartEnabled = false, want true")
+	}
+	if !cfg.NuclearRestartAckWiFiRecovery {
+		t.Error("NuclearRestartAckWiFiRecovery = false, want true")
+	}
+	if cfg.NuclearRestartBlockedCycles != 8 {
+		t.Errorf("NuclearRestartBlockedCycles = %d, want 8", cfg.NuclearRestartBlockedCycles)
+	}
+	if cfg.NuclearRestartMinInterval != 45*time.Minute {
+		t.Errorf("NuclearRestartMinInterval = %v, want 45m", cfg.NuclearRestartMinInterval)
+	}
+}
+
+func TestLoad_NuclearRestartRejectsInvalidValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		envKey  string
+		value   string
+		wantMsg string
+	}{
+		{
+			name:    "blocked cycles zero",
+			envKey:  "NUCLEAR_RESTART_BLOCKED_CYCLES",
+			value:   "0",
+			wantMsg: "NUCLEAR_RESTART_BLOCKED_CYCLES must be >= 1",
+		},
+		{
+			name:    "negative interval",
+			envKey:  "NUCLEAR_RESTART_MIN_INTERVAL",
+			value:   "-1s",
+			wantMsg: "NUCLEAR_RESTART_MIN_INTERVAL must be >= 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv(tc.envKey, tc.value)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("Load() expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}

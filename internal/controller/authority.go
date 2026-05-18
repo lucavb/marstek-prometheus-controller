@@ -114,10 +114,12 @@ func (c *Controller) ensureSurplusFeedIn(now time.Time, devStatus marstek.Status
 	return handled, err
 }
 
-func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.Status, desiredWatts int) (bool, error) {
+func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.Status, desiredWatts int, smoothed float64) (bool, error) {
 	outputEnablePayload := marstek.BuildOutputEnablePayload(true, true)
 	if desiredWatts <= 0 {
 		c.outputBlockedCycles = 0
+		c.lastOutputEnableAttemptAt = time.Time{}
+		c.loggedNuclearRestartBlocked = false
 		return false, nil
 	}
 
@@ -131,15 +133,22 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 	currentOutputWatts := devStatus.Output1Watts + devStatus.Output2Watts
 	solarInputWatts := devStatus.Solar1Watts + devStatus.Solar2Watts
 	batteryContributionWatts := currentOutputWatts - solarInputWatts
-	if currentOutputWatts > 0 || solarInputWatts > 0 || !slotArmed || c.lastCommandWatts <= 0 {
+	if batteryContributionWatts > 0 || !slotArmed || c.lastCommandWatts <= 0 {
 		c.outputBlockedCycles = 0
-		if currentOutputWatts > 0 || batteryContributionWatts > 0 || (devStatus.Output1Enabled == 1 && devStatus.Output2Enabled == 1) {
+		c.lastOutputEnableAttemptAt = time.Time{}
+		c.loggedNuclearRestartBlocked = false
+		if batteryContributionWatts > 0 || (devStatus.Output1Enabled == 1 && devStatus.Output2Enabled == 1) {
 			c.clearPendingAuthorityPayload(outputEnablePayload)
 		}
 		return false, nil
 	}
 
 	c.outputBlockedCycles++
+	if handled, err := c.maybeNuclearRestartRecovery(now, devStatus, desiredWatts, smoothed, currentOutputWatts, solarInputWatts, batteryContributionWatts); err != nil {
+		return false, err
+	} else if handled {
+		return true, nil
+	}
 	if c.outputBlockedCycles < 2 {
 		return false, nil
 	}
@@ -157,7 +166,105 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		"battery_contribution_watts", batteryContributionWatts,
 		"o1", devStatus.Output1Enabled,
 		"o2", devStatus.Output2Enabled)
+	if handled {
+		c.lastOutputEnableAttemptAt = now
+	}
 	return handled, err
+}
+
+func (c *Controller) maybeNuclearRestartRecovery(now time.Time, devStatus marstek.Status, desiredWatts int, smoothed float64, currentOutputWatts, solarInputWatts, batteryContributionWatts int) (bool, error) {
+	requiredCycles := c.cfg.NuclearRestartBlockedCycles
+	if requiredCycles <= 0 {
+		requiredCycles = 6
+	}
+	if c.outputBlockedCycles < requiredCycles {
+		return false, nil
+	}
+	if c.lastOutputEnableAttemptAt.IsZero() {
+		c.recordNuclearRestartOutcome("blocked_evidence_insufficient")
+		return false, nil
+	}
+	if smoothed <= float64(c.cfg.ImportBiasWatts) {
+		c.recordNuclearRestartOutcome("blocked_evidence_insufficient")
+		return false, nil
+	}
+	if !c.cfg.NuclearRestartEnabled {
+		c.recordNuclearRestartOutcome("disabled")
+		if !c.loggedNuclearRestartBlocked {
+			c.loggedNuclearRestartBlocked = true
+			slog.Warn("nuclear restart recovery disabled despite sustained blocked output",
+				"blocked_cycles", c.outputBlockedCycles,
+				"desired_watts", desiredWatts,
+				"smoothed_grid_watts", smoothed,
+				"output_watts", currentOutputWatts,
+				"solar_input_watts", solarInputWatts,
+				"battery_contribution_watts", batteryContributionWatts,
+				"enable_env", "NUCLEAR_RESTART_ENABLED=true",
+				"ack_env", "NUCLEAR_RESTART_ACK_WIFI_RECOVERY=true")
+		}
+		return false, nil
+	}
+	if !c.cfg.NuclearRestartAckWiFiRecovery {
+		c.recordNuclearRestartOutcome("wifi_ack_missing")
+		slog.Error("nuclear restart recovery blocked: WiFi recovery acknowledgement missing",
+			"blocked_cycles", c.outputBlockedCycles,
+			"ack_env", "NUCLEAR_RESTART_ACK_WIFI_RECOVERY=true")
+		return false, nil
+	}
+	minInterval := c.cfg.NuclearRestartMinInterval
+	if minInterval > 0 && !c.lastNuclearRestartAt.IsZero() && now.Sub(c.lastNuclearRestartAt) < minInterval {
+		c.recordNuclearRestartOutcome("rate_limited")
+		slog.Warn("nuclear restart recovery rate limited",
+			"last_restart_at", c.lastNuclearRestartAt,
+			"min_interval", minInterval)
+		return false, nil
+	}
+
+	if err := c.pub.Publish(c.cfg.ControlTopic, marstek.RestartPayload); err != nil {
+		outcome := "publish_error"
+		if classifyMQTTError(err) == "disconnected" {
+			outcome = "mqtt_not_connected"
+		}
+		c.recordNuclearRestartOutcome(outcome)
+		if c.m != nil {
+			c.m.MQTTPublishErrorsTotal.WithLabelValues(classifyMQTTError(err)).Inc()
+		}
+		slog.Warn("nuclear restart recovery publish failed",
+			"err", err,
+			"outcome", outcome)
+		return false, err
+	}
+
+	blockedCycles := c.outputBlockedCycles
+	c.lastNuclearRestartAt = now
+	c.outputBlockedCycles = 0
+	c.lastOutputEnableAttemptAt = time.Time{}
+	c.loggedNuclearRestartBlocked = false
+	c.authorityPendingPayload = marstek.RestartPayload
+	c.authorityPendingSince = now
+	c.authorityPendingSeenAt = time.Time{}
+	if c.m != nil {
+		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
+		c.m.RecordLastMQTTPublish(now)
+		c.m.NuclearRestartTotal.WithLabelValues("restart_command_published").Inc()
+		c.m.LastNuclearRestartTimestampSecs.Set(float64(now.Unix()))
+	}
+	slog.Error("nuclear restart recovery published device restart",
+		"payload", marstek.RestartPayload,
+		"blocked_cycles", blockedCycles,
+		"desired_watts", desiredWatts,
+		"smoothed_grid_watts", smoothed,
+		"output_watts", currentOutputWatts,
+		"solar_input_watts", solarInputWatts,
+		"battery_contribution_watts", batteryContributionWatts)
+	return true, nil
+}
+
+func (c *Controller) recordNuclearRestartOutcome(outcome string) {
+	if c.m == nil || outcome == "" {
+		return
+	}
+	c.m.NuclearRestartTotal.WithLabelValues(outcome).Inc()
 }
 
 func (c *Controller) desiredControlledSlot(devStatus marstek.Status, desiredWatts int) (marstek.Slot, [5]marstek.Slot) {

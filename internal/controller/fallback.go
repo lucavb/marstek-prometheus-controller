@@ -19,6 +19,8 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 		slog.Info("top-charge idle deactivated", "reason", "fallback")
 	}
 	c.outputBlockedCycles = 0
+	c.lastOutputEnableAttemptAt = time.Time{}
+	c.loggedNuclearRestartBlocked = false
 
 	// Prefer the last known device status so the other four schedule slots are
 	// preserved. Fall back to a zero status only if we have never successfully

@@ -81,6 +81,10 @@ type Metrics struct {
 	DeviceRestartsTotal            *prometheus.CounterVec // label: outcome (sent|skipped_not_connected|publish_error)
 	LastDeviceRestartTimestampSecs prometheus.Gauge       // Unix seconds of last successful restart command; 0 if never
 	NextDeviceRestartTimestampSecs prometheus.Gauge       // Unix seconds of upcoming scheduled fire; 0 if disabled
+
+	// Nuclear restart recovery (explicit opt-in authority escalation).
+	NuclearRestartTotal             *prometheus.CounterVec // label: outcome
+	LastNuclearRestartTimestampSecs prometheus.Gauge       // Unix seconds of last nuclear restart command; 0 if never
 }
 
 // New creates a Metrics instance with a fresh private registry, all instruments
@@ -202,10 +206,12 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		// DeviceRestartsTotal, LastDeviceRestartTimestampSecs, and
 		// NextDeviceRestartTimestampSecs are always registered but stay at zero
 		// until the scheduler goroutine is started.
-		DeviceRestartInfo:              newGaugeVec("device_restart_info", "Scheduled device restart configuration (value always 1). Only emitted when DEVICE_RESTART_SCHEDULE is set.", []string{"spec", "timezone"}),
-		DeviceRestartsTotal:            newCounterVec("device_restarts_total", "Total device restart commands by outcome.", []string{"outcome"}),
-		LastDeviceRestartTimestampSecs: newGauge("last_device_restart_timestamp_seconds", "Unix timestamp of the last successful device restart command; 0 if never sent."),
-		NextDeviceRestartTimestampSecs: newGauge("next_device_restart_timestamp_seconds", "Unix timestamp of the next scheduled device restart; 0 if the feature is disabled."),
+		DeviceRestartInfo:               newGaugeVec("device_restart_info", "Scheduled device restart configuration (value always 1). Only emitted when DEVICE_RESTART_SCHEDULE is set.", []string{"spec", "timezone"}),
+		DeviceRestartsTotal:             newCounterVec("device_restarts_total", "Total device restart commands by outcome.", []string{"outcome"}),
+		LastDeviceRestartTimestampSecs:  newGauge("last_device_restart_timestamp_seconds", "Unix timestamp of the last successful device restart command; 0 if never sent."),
+		NextDeviceRestartTimestampSecs:  newGauge("next_device_restart_timestamp_seconds", "Unix timestamp of the next scheduled device restart; 0 if the feature is disabled."),
+		NuclearRestartTotal:             newCounterVec("nuclear_restart_total", "Nuclear stuck-inverter restart recovery actions by outcome.", []string{"outcome"}),
+		LastNuclearRestartTimestampSecs: newGauge("last_nuclear_restart_timestamp_seconds", "Unix timestamp of the last nuclear stuck-inverter restart command; 0 if never sent."),
 
 		ControlLoopDurationSecs: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace:   ns,

@@ -83,6 +83,14 @@ type Config struct {
 	// periodically. Empty schedule disables the feature entirely.
 	DeviceRestartSchedule string         // DEVICE_RESTART_SCHEDULE: 5-field cron, e.g. "0 3 * * *"
 	DeviceRestartLocation *time.Location // parsed from DEVICE_RESTART_TIMEZONE; nil when schedule is empty
+
+	// Nuclear restart recovery — opt-in last resort for the inverter accepting
+	// runtime commands but remaining inert. Requires an explicit WiFi recovery
+	// acknowledgement because cd=10 can make the battery drop off WiFi.
+	NuclearRestartEnabled         bool
+	NuclearRestartAckWiFiRecovery bool
+	NuclearRestartBlockedCycles   int
+	NuclearRestartMinInterval     time.Duration
 }
 
 // Load reads all configuration from environment variables and returns a
@@ -142,6 +150,11 @@ func Load() (Config, error) {
 		SurplusFeedInRecoveryMinInterval: getEnvDuration("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", 6*time.Hour),
 
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
+
+		NuclearRestartEnabled:         getEnvBool("NUCLEAR_RESTART_ENABLED", false),
+		NuclearRestartAckWiFiRecovery: getEnvBool("NUCLEAR_RESTART_ACK_WIFI_RECOVERY", false),
+		NuclearRestartBlockedCycles:   getEnvInt("NUCLEAR_RESTART_BLOCKED_CYCLES", 6),
+		NuclearRestartMinInterval:     getEnvDuration("NUCLEAR_RESTART_MIN_INTERVAL", 6*time.Hour),
 	}
 	// Parse timezone only when a schedule is configured. This keeps the
 	// time/tzdata database lookup out of the hot path and makes it clear that
@@ -245,6 +258,15 @@ func (c *Config) validate() error {
 		if _, err := schedule.Parse(c.DeviceRestartSchedule); err != nil {
 			errs = append(errs, fmt.Sprintf("DEVICE_RESTART_SCHEDULE: %v", err))
 		}
+	}
+	if c.NuclearRestartEnabled && !c.NuclearRestartAckWiFiRecovery {
+		errs = append(errs, "NUCLEAR_RESTART_ENABLED=true requires NUCLEAR_RESTART_ACK_WIFI_RECOVERY=true (device restart can drop WiFi until app/BLE/ESP32 recovery)")
+	}
+	if c.NuclearRestartBlockedCycles < 1 {
+		errs = append(errs, "NUCLEAR_RESTART_BLOCKED_CYCLES must be >= 1")
+	}
+	if c.NuclearRestartMinInterval < 0 {
+		errs = append(errs, "NUCLEAR_RESTART_MIN_INTERVAL must be >= 0")
 	}
 
 	if len(errs) > 0 {
