@@ -2746,6 +2746,34 @@ func TestStep_PassthroughRecovery_DetectsStallBelowNearFullSoC(t *testing.T) {
 	}
 }
 
+func TestStep_PassthroughRecovery_DetectsStallWhenOutputOnlyMatchesSolar(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := nearFullIdleCfg("topic", "00:00", "23:59")
+	cfg.PassthroughStallDetectCycles = 2
+	cfg.PassthroughAutoRecovery = true
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.PassthroughStallDetectCycles+2; i++ {
+		p.set(150, 0)
+		// Output tracks solar pass-through exactly, so the battery contributes
+		// nothing even though the controller is commanding discharge.
+		st.setFresh(devStatusAtSoCPassThrough(90, 150, 150, 150, 150))
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	if got := pub.countContaining("cd=17,md=0"); got == 0 {
+		t.Fatalf("expected charging-mode nudge when output only matches solar, got %d", got)
+	}
+	if got := pub.countContaining("cd=20,md=0"); got == 0 {
+		t.Fatalf("expected timed-discharge nudge when output only matches solar, got %d", got)
+	}
+}
+
 func TestStep_PassthroughRecovery_NormalControlRunsAfterDisable(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}

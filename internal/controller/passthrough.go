@@ -33,15 +33,19 @@ func (c *Controller) maybeHandlePassthroughStall(ctx context.Context, now time.T
 	}
 
 	currentOutput := devStatus.Output1Watts + devStatus.Output2Watts
+	solarInput := devStatus.Solar1Watts + devStatus.Solar2Watts
+	batteryContributionWatts := currentOutput - solarInput
 	passThroughActive := devStatus.PassThroughActive()
 	importingEnough := smoothed > c.passthroughImportThresholdWatts()
 	commandedEnough := c.lastCommandWatts >= c.cfg.PassthroughStallMinCommandWatts ||
 		targetWatts >= c.cfg.PassthroughStallMinCommandWatts
 
 	// Firmware pass-through can stall timed discharge outside the near-full band
-	// as well, so detection is based on observed behavior (import + commanded
-	// discharge + zero output + pass-through active), not SoC thresholds.
-	if !passThroughActive || !importingEnough || !commandedEnough || currentOutput > 0 {
+	// as well. On fw116 the output watts can stay non-zero because they only
+	// reflect solar pass-through, so treat "output ~= solar" as stalled too.
+	// Detection therefore keys off import + commanded discharge + pass-through
+	// active + no positive battery contribution, not SoC thresholds.
+	if !passThroughActive || !importingEnough || !commandedEnough || batteryContributionWatts > 0 {
 		c.resetPassthroughStall()
 		return false, nil
 	}
@@ -56,11 +60,14 @@ func (c *Controller) maybeHandlePassthroughStall(ctx context.Context, now time.T
 		if c.m != nil {
 			c.m.PassthroughStallDetected.Inc()
 		}
-		slog.Warn("pass-through stall detected: commanded discharge but device output remains zero",
+		slog.Warn("pass-through stall detected: commanded discharge but battery contribution remains zero",
 			"stall_cycles", c.passthroughStallCycles,
 			"target_watts", targetWatts,
 			"last_command_watts", c.lastCommandWatts,
 			"smoothed_grid_watts", math.Round(smoothed),
+			"current_output_watts", currentOutput,
+			"solar_input_watts", solarInput,
+			"battery_contribution_watts", batteryContributionWatts,
 			"soc_pct", devStatus.SOCPercent,
 			"surplus_feed_in", devStatus.SurplusFeedIn,
 			"p1", devStatus.Solar1Mode,
