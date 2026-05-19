@@ -387,6 +387,62 @@ func TestStep_AuthorityUnblocksOutputsAfterSustainedZeroOutput(t *testing.T) {
 	}
 }
 
+func TestStep_OutputEnableRemediationDoesNotStarveHigherSlotCommand(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	// First publish establishes the stale low command that the live incident got
+	// stuck on.
+	p.set(300, 0)
+	st.setFresh(statusWith(80, 0, 0, 0, 0, true))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() initial low command error = %v", err)
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=300,") {
+		t.Fatalf("expected initial 300 W slot publish, got %q", got)
+	}
+
+	// The device still reports zero battery contribution and the old 300 W slot,
+	// but demand has risen sharply. The controller must advance the slot command
+	// to the new target instead of getting stuck in output-enable remediation.
+	clk.advance(cfg.ControlInterval)
+	blockedAt300 := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 300)
+	blockedAt300.Output1Enabled = 0
+	blockedAt300.Output2Enabled = 0
+	p.set(800, 0)
+	st.setFresh(blockedAt300)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() higher demand error = %v", err)
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=800,") {
+		t.Fatalf("expected higher 800 W slot publish, got %q", got)
+	}
+	if got := pub.countContaining("cd=18,md=3"); got != 0 {
+		t.Fatalf("output-enable remediation should not fire before desired slot is applied, got %d publishes", got)
+	}
+
+	// Once the device status reflects the desired 800 W slot and still reports
+	// zero battery contribution, remediation should continue to work normally.
+	blockedAt800 := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 800)
+	blockedAt800.Output1Enabled = 0
+	blockedAt800.Output2Enabled = 0
+	for range 2 {
+		clk.advance(cfg.ControlInterval)
+		p.set(800, 0)
+		st.setFresh(blockedAt800)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() blocked-at-target error = %v", err)
+		}
+	}
+	if got := pub.last(); got != "cd=18,md=3" {
+		t.Fatalf("expected output-enable remediation after target slot was applied, got %q", got)
+	}
+}
+
 func TestStep_NuclearRestartDisabledByDefault(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}

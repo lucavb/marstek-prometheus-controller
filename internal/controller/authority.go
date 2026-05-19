@@ -128,6 +128,7 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		idx = 0
 	}
 	controlledSlot := devStatus.Slots[idx]
+	desiredSlot, _ := c.desiredControlledSlot(devStatus, desiredWatts)
 	slotArmed := controlledSlot.Enabled && controlledSlot.Watts > 0
 
 	currentOutputWatts := devStatus.Output1Watts + devStatus.Output2Watts
@@ -140,6 +141,15 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		if batteryContributionWatts > 0 || (devStatus.Output1Enabled == 1 && devStatus.Output2Enabled == 1) {
 			c.clearPendingAuthorityPayload(outputEnablePayload)
 		}
+		return false, nil
+	}
+	if controlledSlot.Enabled != desiredSlot.Enabled ||
+		controlledSlot.Start != desiredSlot.Start ||
+		controlledSlot.End != desiredSlot.End ||
+		(desiredSlot.Enabled && controlledSlot.Watts != desiredSlot.Watts) {
+		c.outputBlockedCycles = 0
+		c.lastOutputEnableAttemptAt = time.Time{}
+		c.loggedNuclearRestartBlocked = false
 		return false, nil
 	}
 
