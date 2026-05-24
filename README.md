@@ -76,17 +76,24 @@ small discharge commands and zero. When the device reports surplus feed-in
 enabled (`tc_dis=0`) and there is evidence that PV can pass through firmware,
 the controller enters a small **top-charge idle** regime: it disables the
 controlled timed-discharge slot once, then stays quiet while firmware routes PV.
+That idle is no longer fire-and-forget: it must keep proving that pass-through
+or real output is still happening, otherwise the controller exits back to normal
+control and rate-limits re-entry.
 
 **Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `100`),
 surplus feed-in enabled, and surplus evidence for
 `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) cycles. Surplus evidence is
-solar input/output, firmware pass-through (`p1`/`p2` bit 1), or a smoothed grid
-reading no higher than `IMPORT_BIAS_WATTS`. Meaningful grid import blocks entry.
+solar input, real output, or firmware pass-through (`p1`/`p2` bit 1). Raw or
+smoothed meaningful grid import blocks entry.
 
-**Exit:** normal control resumes when smoothed import is
+**Exit:** normal control resumes when raw or smoothed grid import is
 `> NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS` (default `50 W`) for
-`NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` (default `4`) cycles, or when SoC is
-below the entry threshold for `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` cycles.
+`NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` (default `4`) cycles, when
+pass-through/output evidence is lost for
+`NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` cycles, or when SoC is below the entry
+threshold for `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` cycles. Failed idle attempts
+are cooldown-limited so the controller cannot immediately disable the slot
+again after normal control has just resumed.
 
 Surplus feed-in is treated as an authority invariant. If the device reports it
 disabled, the controller warns and continues normal discharge. It will re-enable
@@ -163,8 +170,8 @@ All settings are environment variables:
 | `NEAR_FULL_IDLE_ENABLED`                  | `true`                     | Enable top-charge pass-through idle (see [Top-charge pass-through](#top-charge-pass-through)). Set to `false` to run normal grid-meter-driven control at all SoC levels.                                                                                         |
 | `NEAR_FULL_IDLE_ENTER_PERCENT`            | `100`                      | SoC threshold for top-charge idle entry and SoC-based exit. The default requires a truly full battery. Must be 1–100.                                                                                                                                             |
 | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES`      | `2`                        | Debounce length (in control cycles) for top-charge idle entry and SoC exit. Must be ≥ 1.                                                                                                                                                                         |
-| `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS`   | `50`                       | Smoothed-grid import threshold (W) above which an import sample is counted while top-charge idle is active. Must be ≥ 0.                                                                                                                                         |
-| `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` | `4`                        | Consecutive high-import samples required to exit top-charge idle via the grid-import path. Set to `0` to disable this exit path. Must be ≥ 0.                                                                                                                     |
+| `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS`   | `50`                       | Raw/smoothed grid-import threshold (W) above which an import sample is counted while top-charge idle is active. Must be ≥ 0.                                                                                                                                     |
+| `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` | `4`                        | Consecutive high-import samples required to exit top-charge idle via the grid-import path. Set to `0` to disable both raw-grid and smoothed-grid import exits. Must be ≥ 0.                                                                                      |
 | `SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL`    | `6h`                       | Minimum time between automatic `cd=31,touchuan_disa=0` surplus-feed-in re-enable writes. The write is still gated by `ALLOW_FLASH_WRITES=true`.                                                                                                                  |
 | `DEVICE_RESTART_SCHEDULE`                 | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4` * * * for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart).                                     |
 | `DEVICE_RESTART_TIMEZONE`                 | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty.                                                                                                                                         |
@@ -345,7 +352,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `fallback_total`                   | Counter   | `reason`    | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error)                                                      |
 | `top_charge_idle_entered_total`    | Counter   |             | Times top-charge idle has been activated (rising edge)                                                                                         |
 | `top_charge_idle_exited_total`     | Counter   |             | Times top-charge idle has been deactivated (falling edge)                                                                                      |
-| `top_charge_idle_exit_reason_total`| Counter   | `reason`    | Reason-specific exits from top-charge idle (`soc_exit`, `grid_import`, `fallback`, `surplus_feed_in_disabled`, `disabled`, `soc_floor`)        |
+| `top_charge_idle_exit_reason_total`| Counter   | `reason`    | Reason-specific exits from top-charge idle (`soc_exit`, `grid_import`, `raw_grid_import`, `passthrough_lost`, `fallback`, `surplus_feed_in_disabled`, `disabled`, `soc_floor`) |
 | `authority_remediation_total`      | Counter   | `kind`,`outcome` | Authority remediation actions such as `charging_mode`, `controlled_slot`, `output_enable`, `surplus_feed_in`, and `stuck_output_rearm`      |
 | `nuclear_restart_total`            | Counter   | `outcome`   | Nuclear stuck-inverter restart recovery outcomes                                                                                               |
 | `last_nuclear_restart_timestamp_seconds` | Gauge |             | Unix timestamp of the last successful nuclear restart command                                                                                  |

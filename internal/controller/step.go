@@ -79,7 +79,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "soc_floor")
 	}
 
-	if c.updateTopChargeIdle(devStatus, smoothed) {
+	if c.updateTopChargeIdle(now, devStatus, sample.Watts, smoothed) {
 		c.ready = true
 		c.outputBlockedCycles = 0
 		c.lastOutputEnableAttemptAt = time.Time{}

@@ -114,10 +114,13 @@ type Controller struct {
 
 	// topChargeIdleActive is true while the controller is intentionally leaving
 	// the controlled slot disabled so full-charge PV can pass through firmware.
-	topChargeIdleActive         bool
-	topChargeIdleEnterSamples   int
-	topChargeIdleSoCExitSamples int
-	topChargeIdleImportSamples  int
+	topChargeIdleActive                 bool
+	topChargeIdleEnterSamples           int
+	topChargeIdleSoCExitSamples         int
+	topChargeIdleImportSamples          int
+	topChargeIdleRawImportSamples       int
+	topChargeIdlePassThroughLostSamples int
+	topChargeIdleBlockedUntil           time.Time
 
 	// outputBlockedCycles counts consecutive cycles where the controller wants
 	// discharge, the slot is already armed, but the device still reports no
@@ -209,6 +212,8 @@ func (c *Controller) resetTopChargeIdleState(reason string) bool {
 	c.topChargeIdleEnterSamples = 0
 	c.topChargeIdleSoCExitSamples = 0
 	c.topChargeIdleImportSamples = 0
+	c.topChargeIdleRawImportSamples = 0
+	c.topChargeIdlePassThroughLostSamples = 0
 	if c.m != nil {
 		c.m.TopChargeIdleActive.Set(0)
 		if wasActive {
@@ -219,4 +224,17 @@ func (c *Controller) resetTopChargeIdleState(reason string) bool {
 		}
 	}
 	return wasActive
+}
+
+func (c *Controller) topChargeIdleFailureCooldown() time.Duration {
+	cooldown := c.authorityPublishCooldown()
+	if cooldown < time.Minute {
+		cooldown = time.Minute
+	}
+	return cooldown
+}
+
+func (c *Controller) blockTopChargeIdleUntil(now time.Time) time.Time {
+	c.topChargeIdleBlockedUntil = now.Add(c.topChargeIdleFailureCooldown())
+	return c.topChargeIdleBlockedUntil
 }

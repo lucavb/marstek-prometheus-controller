@@ -16,7 +16,8 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 		c.m.SetState(metrics.StateFallback)
 	}
 	if c.resetTopChargeIdleState("fallback") {
-		slog.Info("top-charge idle deactivated", "reason", "fallback")
+		blockedUntil := c.blockTopChargeIdleUntil(c.clock.Now())
+		slog.Info("top-charge idle deactivated", "reason", "fallback", "blocked_until", blockedUntil)
 	}
 	c.outputBlockedCycles = 0
 	c.lastOutputEnableAttemptAt = time.Time{}

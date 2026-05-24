@@ -888,6 +888,120 @@ func TestStep_TopChargeIdleExitsOnSustainedImport(t *testing.T) {
 	}
 }
 
+func TestStep_TopChargeIdleExitsWhenPassthroughIsLost(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		status := passThroughStatus(100, 300, 300, 120, 120, true)
+		if i > 0 {
+			status = withControlledSlot(status, true, 240)
+		}
+		st.setFresh(status)
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	countAfterEntry := pub.count()
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(120, 0)
+		st.setFresh(withControlledSlot(statusWith(100, 150, 150, 0, 0, true), false, 0))
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	if pub.count() <= countAfterEntry {
+		t.Fatalf("expected resumed discharge after pass-through was lost")
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=120,") {
+		t.Fatalf("expected resumed discharge after pass-through loss, got %q", got)
+	}
+}
+
+func TestStep_TopChargeIdleExitsOnRawImportWhenEMALags(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.SmoothingAlpha = 0.1
+	cfg.NearFullIdleGridImportExitSamples = 2
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		status := passThroughStatus(100, 300, 300, 120, 120, true)
+		if i > 0 {
+			status = withControlledSlot(status, true, 240)
+		}
+		st.setFresh(status)
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	countAfterEntry := pub.count()
+	for i := 0; i < cfg.NearFullIdleGridImportExitSamples; i++ {
+		p.set(400, 0)
+		st.setFresh(withControlledSlot(passThroughStatus(100, 150, 150, 0, 0, true), false, 0))
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	if pub.count() <= countAfterEntry {
+		t.Fatalf("expected resumed discharge after sustained raw import")
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=80,") {
+		t.Fatalf("expected resumed minimum discharge after raw import exit, got %q", got)
+	}
+}
+
+func TestStep_TopChargeIdleCooldownPreventsImmediateReentry(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.PrometheusStaleAfter = 10 * time.Minute
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(0, 0)
+		status := passThroughStatus(100, 300, 300, 120, 120, true)
+		if i > 0 {
+			status = withControlledSlot(status, true, 240)
+		}
+		st.setFresh(status)
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+	if got := pub.countContaining(",a1=0,b1=00:00,e1=23:59,v1=0,"); got != 1 {
+		t.Fatalf("expected one idle-entry disable publish, got %d", got)
+	}
+
+	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
+		p.set(120, 0)
+		st.setFresh(withControlledSlot(statusWith(100, 150, 150, 0, 0, true), false, 0))
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	for i := 0; i < 2; i++ {
+		p.set(0, 0)
+		st.setFresh(withControlledSlot(passThroughStatus(100, 300, 300, 120, 120, true), true, 240))
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	if got := pub.countContaining(",a1=0,b1=00:00,e1=23:59,v1=0,"); got != 1 {
+		t.Fatalf("cooldown must prevent immediate top-charge re-entry, got %d disable publishes", got)
+	}
+}
+
 func TestStep_TopChargeIdleExitsWhenSoCDropsBelowFull(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
