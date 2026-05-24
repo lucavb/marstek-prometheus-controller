@@ -387,6 +387,137 @@ func TestStep_AuthorityUnblocksOutputsAfterSustainedZeroOutput(t *testing.T) {
 	}
 }
 
+func TestStep_FullSoCStuckOutputRearmsControlledSlot(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	p.set(200, 0)
+	st.setFresh(statusWith(99, 0, 0, 0, 0, true))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() initial command error = %v", err)
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=200,") {
+		t.Fatalf("expected initial 200 W slot publish, got %q", got)
+	}
+
+	blocked := withControlledSlot(statusWith(100, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	for i := 0; i < 2; i++ {
+		clk.advance(cfg.ControlInterval)
+		p.set(200, 0)
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() stuck-output cycle %d error = %v", i, err)
+		}
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=0,") || !strings.Contains(got, ",v1=0,") {
+		t.Fatalf("expected controlled slot disable for re-arm, got %q", got)
+	}
+
+	clk.advance(cfg.ControlInterval)
+	p.set(200, 0)
+	st.setFresh(withControlledSlot(blocked, false, 0))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() re-enable error = %v", err)
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=200,") {
+		t.Fatalf("expected controlled slot re-enable, got %q", got)
+	}
+}
+
+func TestStep_FullSoCStuckOutputRearmCooldownPreventsFlapping(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	p.set(200, 0)
+	st.setFresh(statusWith(99, 0, 0, 0, 0, true))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() initial command error = %v", err)
+	}
+
+	blocked := withControlledSlot(statusWith(100, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	for i := 0; i < 4; i++ {
+		clk.advance(cfg.ControlInterval)
+		p.set(200, 0)
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() stuck-output cycle %d error = %v", i, err)
+		}
+	}
+	if got := pub.countContaining(",a1=0,b1=00:00,e1=23:59,v1=0,"); got != 1 {
+		t.Fatalf("expected exactly one controlled slot disable during cooldown, got %d", got)
+	}
+}
+
+func TestStep_FullSoCStuckOutputRearmRequiresZeroOutput(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	p.set(200, 0)
+	st.setFresh(statusWith(99, 0, 0, 0, 0, true))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() initial command error = %v", err)
+	}
+
+	flowing := withControlledSlot(statusWith(100, 0, 0, 120, 120, true), true, 200)
+	for i := 0; i < 4; i++ {
+		clk.advance(cfg.ControlInterval)
+		p.set(200, 0)
+		st.setFresh(flowing)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() flowing-output cycle %d error = %v", i, err)
+		}
+	}
+	if got := pub.countContaining(",a1=0,b1=00:00,e1=23:59,v1=0,"); got != 0 {
+		t.Fatalf("must not re-arm while output is flowing, got %d disables", got)
+	}
+}
+
+func TestStep_FullSoCStuckOutputRearmRequiresFullSoC(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	p.set(200, 0)
+	st.setFresh(statusWith(80, 0, 0, 0, 0, true))
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() initial command error = %v", err)
+	}
+
+	blocked := withControlledSlot(statusWith(99, 0, 0, 0, 0, true), true, 200)
+	blocked.Output1Enabled = 0
+	blocked.Output2Enabled = 0
+	for i := 0; i < 4; i++ {
+		clk.advance(cfg.ControlInterval)
+		p.set(200, 0)
+		st.setFresh(blocked)
+		if err := c.Step(context.Background()); err != nil {
+			t.Fatalf("Step() below-full cycle %d error = %v", i, err)
+		}
+	}
+	if got := pub.countContaining(",a1=0,b1=00:00,e1=23:59,v1=0,"); got != 0 {
+		t.Fatalf("must not use full-SoC re-arm below full SoC, got %d disables", got)
+	}
+}
+
 func TestStep_OutputEnableRemediationDoesNotStarveHigherSlotCommand(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}

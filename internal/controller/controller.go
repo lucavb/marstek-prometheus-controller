@@ -125,6 +125,14 @@ type Controller struct {
 	// (outputs blocked), not as a control-law problem.
 	outputBlockedCycles int
 
+	// stuckOutputRearmPending tracks the narrow two-step recovery for B2500
+	// firmware that accepts a full-SoC timed-discharge target but leaves both
+	// outputs inert until the controlled slot is toggled off and back on.
+	stuckOutputRearmPending   bool
+	stuckOutputRearmWatts     int
+	stuckOutputRearmStartedAt time.Time
+	lastStuckOutputRearmAt    time.Time
+
 	lastSurplusFeedInRecoveryAt time.Time
 	loggedSurplusFeedInBlocked  bool
 	lastOutputEnableAttemptAt   time.Time

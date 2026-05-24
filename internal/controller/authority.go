@@ -28,6 +28,10 @@ func (c *Controller) clearPendingAuthorityPayload(payload string) {
 }
 
 func (c *Controller) publishAuthorityPayload(now, observedAt time.Time, payload, kind string, attrs ...any) (bool, bool, error) {
+	return c.publishAuthorityPayloadWithOutcome(now, observedAt, payload, kind, "published", attrs...)
+}
+
+func (c *Controller) publishAuthorityPayloadWithOutcome(now, observedAt time.Time, payload, kind, outcome string, attrs ...any) (bool, bool, error) {
 	if payload == "" {
 		return false, false, nil
 	}
@@ -54,7 +58,7 @@ func (c *Controller) publishAuthorityPayload(now, observedAt time.Time, payload,
 	c.authorityPendingSeenAt = observedAt
 	if c.m != nil {
 		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
-		c.m.AuthorityRemediationTotal.WithLabelValues(kind, "published").Inc()
+		c.m.AuthorityRemediationTotal.WithLabelValues(kind, outcome).Inc()
 		c.m.RecordLastMQTTPublish(now)
 	}
 	logAttrs := append([]any{"kind", kind, "payload", payload}, attrs...)
@@ -120,6 +124,7 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		c.outputBlockedCycles = 0
 		c.lastOutputEnableAttemptAt = time.Time{}
 		c.loggedNuclearRestartBlocked = false
+		c.clearStuckOutputRearm()
 		return false, nil
 	}
 
@@ -134,10 +139,21 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 	currentOutputWatts := devStatus.Output1Watts + devStatus.Output2Watts
 	solarInputWatts := devStatus.Solar1Watts + devStatus.Solar2Watts
 	batteryContributionWatts := currentOutputWatts - solarInputWatts
+	if c.stuckOutputRearmPending {
+		if !c.fullSoCStuckOutputCandidate(devStatus, desiredWatts, smoothed, currentOutputWatts) {
+			c.clearStuckOutputRearm()
+		} else {
+			handled, err := c.maybeCompleteStuckOutputRearm(now, statusSlotWatts(desiredWatts, c.stuckOutputRearmWatts), devStatus, currentOutputWatts, smoothed)
+			if handled || err != nil {
+				return handled, err
+			}
+		}
+	}
 	if batteryContributionWatts > 0 || !slotArmed || c.lastCommandWatts <= 0 {
 		c.outputBlockedCycles = 0
 		c.lastOutputEnableAttemptAt = time.Time{}
 		c.loggedNuclearRestartBlocked = false
+		c.clearStuckOutputRearm()
 		if batteryContributionWatts > 0 || (devStatus.Output1Enabled == 1 && devStatus.Output2Enabled == 1) {
 			c.clearPendingAuthorityPayload(outputEnablePayload)
 		}
@@ -154,6 +170,9 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 	}
 
 	c.outputBlockedCycles++
+	if handled, err := c.maybeStartStuckOutputRearm(now, devStatus, desiredWatts, smoothed, currentOutputWatts); handled || err != nil {
+		return handled, err
+	}
 	if handled, err := c.maybeNuclearRestartRecovery(now, devStatus, desiredWatts, smoothed, currentOutputWatts, solarInputWatts, batteryContributionWatts); err != nil {
 		return false, err
 	} else if handled {
@@ -180,6 +199,146 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		c.lastOutputEnableAttemptAt = now
 	}
 	return handled, err
+}
+
+func (c *Controller) fullSoCStuckOutputCandidate(devStatus marstek.Status, desiredWatts int, smoothed float64, currentOutputWatts int) bool {
+	if desiredWatts <= 0 || devStatus.SOCPercent < 100 {
+		return false
+	}
+	if smoothed <= float64(c.cfg.ImportBiasWatts) {
+		return false
+	}
+	nearZeroLimit := c.cfg.MinOutputWatts / 2
+	if nearZeroLimit < 20 {
+		nearZeroLimit = 20
+	}
+	return currentOutputWatts <= nearZeroLimit
+}
+
+func (c *Controller) stuckOutputRearmCooldown() time.Duration {
+	cooldown := 2 * c.authorityPublishCooldown()
+	if cooldown < time.Minute {
+		cooldown = time.Minute
+	}
+	return cooldown
+}
+
+func (c *Controller) maybeStartStuckOutputRearm(now time.Time, devStatus marstek.Status, desiredWatts int, smoothed float64, currentOutputWatts int) (bool, error) {
+	if c.outputBlockedCycles < 2 {
+		return false, nil
+	}
+	if !c.fullSoCStuckOutputCandidate(devStatus, desiredWatts, smoothed, currentOutputWatts) {
+		return false, nil
+	}
+	cooldown := c.stuckOutputRearmCooldown()
+	if !c.lastStuckOutputRearmAt.IsZero() && now.Sub(c.lastStuckOutputRearmAt) < cooldown {
+		if c.m != nil {
+			c.m.AuthorityRemediationTotal.WithLabelValues("stuck_output_rearm", "cooldown").Inc()
+		}
+		return false, nil
+	}
+
+	_, slots := c.desiredControlledSlot(devStatus, desiredWatts)
+	idx := c.cfg.ScheduleSlot - 1
+	if idx < 0 || idx > 4 {
+		idx = 0
+	}
+	current := slots[idx]
+	slots[idx] = marstek.Slot{
+		Enabled: false,
+		Start:   c.cfg.ScheduleStart,
+		End:     c.cfg.ScheduleEnd,
+		Watts:   0,
+	}
+	payload := marstek.BuildTimedDischargePayload(slots, false)
+	handled, published, err := c.publishAuthorityPayloadWithOutcome(now, time.Time{}, payload, "stuck_output_rearm", "disable_sent",
+		"slot", c.cfg.ScheduleSlot,
+		"desired_watts", desiredWatts,
+		"current_enabled", current.Enabled,
+		"current_watts", current.Watts,
+		"soc_pct", devStatus.SOCPercent,
+		"smoothed_grid_watts", smoothed,
+		"output_watts", currentOutputWatts,
+		"outputs_enabled", devStatus.Output1Enabled+devStatus.Output2Enabled,
+		"blocked_cycles", c.outputBlockedCycles)
+	if published {
+		c.stuckOutputRearmPending = true
+		c.stuckOutputRearmWatts = desiredWatts
+		c.stuckOutputRearmStartedAt = now
+		c.lastStuckOutputRearmAt = now
+		c.lastOutputEnableAttemptAt = now
+		c.lastCommandWatts = 0
+		c.lastCommandTime = now
+		if c.m != nil {
+			c.m.CommandedSlotPowerWatts.Set(0)
+		}
+		slog.Warn("full-soc stuck output detected; controlled slot disabled for re-arm",
+			"slot", c.cfg.ScheduleSlot,
+			"desired_watts", desiredWatts,
+			"soc_pct", devStatus.SOCPercent,
+			"smoothed_grid_watts", smoothed,
+			"output_watts", currentOutputWatts,
+			"outputs_enabled", devStatus.Output1Enabled+devStatus.Output2Enabled,
+			"blocked_cycles", c.outputBlockedCycles)
+	}
+	return handled, err
+}
+
+func (c *Controller) maybeCompleteStuckOutputRearm(now time.Time, desiredWatts int, devStatus marstek.Status, currentOutputWatts int, smoothed float64) (bool, error) {
+	if c.stuckOutputRearmStartedAt.IsZero() || now.Sub(c.stuckOutputRearmStartedAt) < c.cfg.ControlInterval {
+		if c.m != nil {
+			c.m.AuthorityRemediationTotal.WithLabelValues("stuck_output_rearm", "await_reenable").Inc()
+		}
+		return true, nil
+	}
+
+	desired, slots := c.desiredControlledSlot(devStatus, desiredWatts)
+	idx := c.cfg.ScheduleSlot - 1
+	if idx < 0 || idx > 4 {
+		idx = 0
+	}
+	current := slots[idx]
+	slots[idx] = desired
+	payload := marstek.BuildTimedDischargePayload(slots, false)
+	handled, published, err := c.publishAuthorityPayloadWithOutcome(now, time.Time{}, payload, "stuck_output_rearm", "reenable_sent",
+		"slot", c.cfg.ScheduleSlot,
+		"desired_watts", desiredWatts,
+		"current_enabled", current.Enabled,
+		"current_watts", current.Watts,
+		"soc_pct", devStatus.SOCPercent,
+		"smoothed_grid_watts", smoothed,
+		"output_watts", currentOutputWatts,
+		"outputs_enabled", devStatus.Output1Enabled+devStatus.Output2Enabled)
+	if published {
+		c.clearStuckOutputRearm()
+		c.lastOutputEnableAttemptAt = now
+		c.lastCommandWatts = desiredWatts
+		c.lastCommandTime = now
+		if c.m != nil {
+			c.m.CommandedSlotPowerWatts.Set(float64(desiredWatts))
+		}
+		slog.Warn("full-soc stuck output re-arm completed; controlled slot re-enabled",
+			"slot", c.cfg.ScheduleSlot,
+			"desired_watts", desiredWatts,
+			"soc_pct", devStatus.SOCPercent,
+			"smoothed_grid_watts", smoothed,
+			"output_watts", currentOutputWatts,
+			"outputs_enabled", devStatus.Output1Enabled+devStatus.Output2Enabled)
+	}
+	return handled, err
+}
+
+func (c *Controller) clearStuckOutputRearm() {
+	c.stuckOutputRearmPending = false
+	c.stuckOutputRearmWatts = 0
+	c.stuckOutputRearmStartedAt = time.Time{}
+}
+
+func statusSlotWatts(desiredWatts, rearmWatts int) int {
+	if desiredWatts > 0 {
+		return desiredWatts
+	}
+	return rearmWatts
 }
 
 func (c *Controller) maybeNuclearRestartRecovery(now time.Time, devStatus marstek.Status, desiredWatts int, smoothed float64, currentOutputWatts, solarInputWatts, batteryContributionWatts int) (bool, error) {

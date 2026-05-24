@@ -94,6 +94,14 @@ the setting with `cd=31,touchuan_disa=0` only when `ALLOW_FLASH_WRITES=true`,
 and rate-limits that persistent write with
 `SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL`.
 
+Some B2500 firmware can still get stuck at full SoC: the timed-discharge
+threshold is accepted, but both outputs report disabled or near-zero watts while
+the house imports from the grid. When that full-SoC stuck-output signature
+persists, the controller performs a volatile controlled-slot re-arm: it disables
+only the controlled slot for one healthy cycle, then writes the desired non-zero
+slot value again. Other schedule slots are preserved, and the retry is
+cooldown-limited so the controller does not flap the device.
+
 **Kill switch:** set `NEAR_FULL_IDLE_ENABLED=false` to disable the regime
 entirely. The controller then runs normal grid-meter-driven control at all SoC
 levels.
@@ -338,7 +346,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `top_charge_idle_entered_total`    | Counter   |             | Times top-charge idle has been activated (rising edge)                                                                                         |
 | `top_charge_idle_exited_total`     | Counter   |             | Times top-charge idle has been deactivated (falling edge)                                                                                      |
 | `top_charge_idle_exit_reason_total`| Counter   | `reason`    | Reason-specific exits from top-charge idle (`soc_exit`, `grid_import`, `fallback`, `surplus_feed_in_disabled`, `disabled`, `soc_floor`)        |
-| `authority_remediation_total`      | Counter   | `kind`,`outcome` | Authority remediation actions such as `charging_mode`, `controlled_slot`, `output_enable`, and `surplus_feed_in`                           |
+| `authority_remediation_total`      | Counter   | `kind`,`outcome` | Authority remediation actions such as `charging_mode`, `controlled_slot`, `output_enable`, `surplus_feed_in`, and `stuck_output_rearm`      |
 | `nuclear_restart_total`            | Counter   | `outcome`   | Nuclear stuck-inverter restart recovery outcomes                                                                                               |
 | `last_nuclear_restart_timestamp_seconds` | Gauge |             | Unix timestamp of the last successful nuclear restart command                                                                                  |
 | `control_loop_duration_seconds`    | Histogram |             | Wall time per control cycle                                                                                                                    |
