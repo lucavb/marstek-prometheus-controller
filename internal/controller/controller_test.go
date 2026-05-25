@@ -506,6 +506,55 @@ func TestStep_HighSoC97StaysLatchedUntilBelowNinetyFiveSoC(t *testing.T) {
 	}
 }
 
+func TestStep_HighSoCTransitionsAreLogged(t *testing.T) {
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.EnforceSurplusFeedIn = false
+	cfg.ImportBiasWatts = 50
+	cfg.HighSoCDisableImportBiasPercent = 90
+	cfg.HighSoCAggressivePercent = 95
+	cfg.HighSoCMaxPercent = 97
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	for _, tc := range []struct {
+		soc  int
+		grid float64
+	}{
+		{soc: 90, grid: 200},
+		{soc: 95, grid: 200},
+		{soc: 97, grid: 200},
+		{soc: 94, grid: 200},
+		{soc: 89, grid: 200},
+	} {
+		p.set(tc.grid, 0)
+		st.setFresh(statusWith(tc.soc, 0, 0, 0, 0, false))
+		_ = c.Step(context.Background())
+		clk.advance(cfg.ControlInterval)
+	}
+
+	logs := buf.String()
+	for _, want := range []string{
+		"msg=\"high-soc policy transitioned\"",
+		"from=inactive to=net_zero",
+		"from=net_zero to=aggressive",
+		"from=aggressive to=max",
+		"from=max to=net_zero",
+		"from=net_zero to=inactive",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected logs to contain %q, got %s", want, logs)
+		}
+	}
+}
+
 func TestStep_AuthorityUnblocksOutputsAfterSustainedZeroOutput(t *testing.T) {
 	p := &fakeProm{}
 	pub := &fakePublisher{}
