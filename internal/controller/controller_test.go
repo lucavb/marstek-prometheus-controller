@@ -130,6 +130,7 @@ func defaultCfg(ctrl, start, end string) controller.Config {
 		ControlInterval:                   15 * time.Second,
 		SmoothingAlpha:                    1.0,
 		DeadbandWatts:                     25,
+		ImportBiasWatts:                   0,
 		RampUpWattsPerCycle:               800,
 		RampDownWattsPerCycle:             800,
 		MinCommandDeltaWatts:              1,
@@ -142,11 +143,15 @@ func defaultCfg(ctrl, start, end string) controller.Config {
 		ScheduleStart:                     start,
 		ScheduleEnd:                       end,
 		PersistToFlash:                    false,
+		EnforceSurplusFeedIn:              true,
 		NearFullIdleEnabled:               true,
 		NearFullIdleEnterPercent:          100,
 		NearFullIdleConsecutiveSamples:    2,
 		NearFullIdleGridImportExitWatts:   50,
 		NearFullIdleGridImportExitSamples: 4,
+		HighSoCDisableImportBiasPercent:   101,
+		HighSoCAggressivePercent:          101,
+		HighSoCMaxPercent:                 101,
 		SurplusFeedInRecoveryMinInterval:  time.Hour,
 		BatterySoCFloorMarginPercent:      2,
 		BatterySoCHysteresisPercent:       5,
@@ -358,6 +363,146 @@ func TestStep_AuthorityRateLimitsSurplusFeedInRecovery(t *testing.T) {
 	_ = c.Step(context.Background())
 	if got := pub.countContaining("cd=31,touchuan_disa=0"); got != 1 {
 		t.Fatalf("expected one rate-limited surplus remediation, got %d", got)
+	}
+}
+
+func TestStep_DisabledSurplusPolicyDoesNotAutoReenableFeedIn(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.EnforceSurplusFeedIn = false
+	cfg.AllowFlashWrites = true
+	cfg.ImportBiasWatts = 50
+	cfg.HighSoCDisableImportBiasPercent = 90
+	cfg.HighSoCAggressivePercent = 95
+	cfg.HighSoCMaxPercent = 97
+
+	p.set(200, 0)
+	st.setFresh(statusWith(80, 0, 0, 0, 0, false))
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	_ = c.Step(context.Background())
+	if got := pub.countContaining("cd=31,touchuan_disa=0"); got != 0 {
+		t.Fatalf("disabled-surplus policy must not auto-enable feed-in, got %d writes", got)
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=150,") {
+		t.Fatalf("expected normal control with import bias preserved below 90%% SoC, got %q", got)
+	}
+}
+
+func TestStep_HighSoC90DisablesImportBias(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.EnforceSurplusFeedIn = false
+	cfg.ImportBiasWatts = 50
+	cfg.HighSoCDisableImportBiasPercent = 90
+	cfg.HighSoCAggressivePercent = 95
+	cfg.HighSoCMaxPercent = 97
+
+	p.set(200, 0)
+	st.setFresh(statusWith(90, 0, 0, 0, 0, false))
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=200,") {
+		t.Fatalf("expected zero-bias net-zero target at 90%% SoC, got %q", got)
+	}
+}
+
+func TestStep_HighSoC95UsesMoreAggressiveTarget(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.EnforceSurplusFeedIn = false
+	cfg.ImportBiasWatts = 50
+	cfg.HighSoCDisableImportBiasPercent = 90
+	cfg.HighSoCAggressivePercent = 95
+	cfg.HighSoCMaxPercent = 97
+
+	p.set(100, 0)
+	st.setFresh(statusWith(95, 200, 200, 0, 0, false))
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=360,") {
+		t.Fatalf("expected aggressive 95%% target using solar-trace candidate, got %q", got)
+	}
+}
+
+func TestStep_HighSoC97ForcesMaxOutputAndSkipsTopChargeIdle(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.EnforceSurplusFeedIn = false
+	cfg.ImportBiasWatts = 50
+	cfg.HighSoCDisableImportBiasPercent = 90
+	cfg.HighSoCAggressivePercent = 95
+	cfg.HighSoCMaxPercent = 97
+
+	p.set(-300, 0)
+	st.setFresh(passThroughStatus(100, 300, 300, 0, 0, false))
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=800,") {
+		t.Fatalf("expected max-output publish in high-SoC protection band, got %q", got)
+	}
+	if strings.Contains(pub.last(), ",a1=0,") {
+		t.Fatalf("high-SoC protection band must not fall back to top-charge idle, got %q", pub.last())
+	}
+}
+
+func TestStep_HighSoC97StaysLatchedUntilBelowNinetyFiveSoC(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.EnforceSurplusFeedIn = false
+	cfg.ImportBiasWatts = 50
+	cfg.HighSoCDisableImportBiasPercent = 90
+	cfg.HighSoCAggressivePercent = 95
+	cfg.HighSoCMaxPercent = 97
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	p.set(-300, 0)
+	st.setFresh(statusWith(97, 0, 0, 0, 0, false))
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",v1=800,") {
+		t.Fatalf("expected max-output high-SoC publish, got %q", got)
+	}
+
+	clk.advance(cfg.ControlInterval)
+	p.set(200, 0)
+	st.setFresh(statusWith(96, 0, 0, 0, 0, false))
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",v1=800,") {
+		t.Fatalf("expected 97%% mode to stay latched until below 95%% SoC, got %q", got)
+	}
+
+	clk.advance(cfg.ControlInterval)
+	p.set(200, 0)
+	st.setFresh(statusWith(94, 0, 0, 0, 0, false))
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",v1=200,") {
+		t.Fatalf("expected max-output mode to exit below 95%% and fall back to 90%%+ policy, got %q", got)
+	}
+
+	clk.advance(cfg.ControlInterval)
+	p.set(200, 0)
+	st.setFresh(statusWith(89, 0, 0, 0, 0, false))
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",v1=150,") {
+		t.Fatalf("expected normal import-bias target after leaving all high-SoC modes, got %q", got)
 	}
 }
 

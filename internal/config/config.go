@@ -75,8 +75,20 @@ type Config struct {
 	NearFullIdleGridImportExitWatts   int
 	NearFullIdleGridImportExitSamples int
 
-	// Surplus feed-in recovery writes a persistent device setting, so it remains
-	// gated by ALLOW_FLASH_WRITES and is heavily rate-limited.
+	// Surplus feed-in policy. When enforcement is disabled the controller treats
+	// tc_dis=1 as a supported mode and does not try to re-enable it.
+	EnforceSurplusFeedIn bool
+
+	// High-SoC discharge policy. These thresholds stage the controller away from
+	// the unstable full-charge state: remove import bias at 90%, switch to a more
+	// aggressive target at 95%, and command max output at 97% until SoC falls
+	// back below the first threshold.
+	HighSoCDisableImportBiasPercent int
+	HighSoCAggressivePercent        int
+	HighSoCMaxPercent               int
+
+	// Surplus feed-in recovery writes a persistent device setting, so it is
+	// gated by ALLOW_FLASH_WRITES, policy opt-in, and a long rate limit.
 	SurplusFeedInRecoveryMinInterval time.Duration
 
 	// Scheduled device restart — opt-in workaround for a device that hangs
@@ -147,6 +159,10 @@ func Load() (Config, error) {
 		NearFullIdleGridImportExitWatts:   getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS", 50),
 		NearFullIdleGridImportExitSamples: getEnvInt("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", 4),
 
+		EnforceSurplusFeedIn:             getEnvBool("ENFORCE_SURPLUS_FEED_IN", false),
+		HighSoCDisableImportBiasPercent:  getEnvInt("HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT", 90),
+		HighSoCAggressivePercent:         getEnvInt("HIGH_SOC_AGGRESSIVE_PERCENT", 95),
+		HighSoCMaxPercent:                getEnvInt("HIGH_SOC_MAX_PERCENT", 97),
 		SurplusFeedInRecoveryMinInterval: getEnvDuration("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", 6*time.Hour),
 
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
@@ -249,6 +265,21 @@ func (c *Config) validate() error {
 	}
 	if c.NearFullIdleGridImportExitSamples < 0 {
 		errs = append(errs, "NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES must be >= 0 (0 disables the grid-import exit path)")
+	}
+	if c.HighSoCDisableImportBiasPercent < 1 || c.HighSoCDisableImportBiasPercent > 100 {
+		errs = append(errs, "HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT must be 1–100")
+	}
+	if c.HighSoCAggressivePercent < 1 || c.HighSoCAggressivePercent > 100 {
+		errs = append(errs, "HIGH_SOC_AGGRESSIVE_PERCENT must be 1–100")
+	}
+	if c.HighSoCMaxPercent < 1 || c.HighSoCMaxPercent > 100 {
+		errs = append(errs, "HIGH_SOC_MAX_PERCENT must be 1–100")
+	}
+	if c.HighSoCDisableImportBiasPercent > c.HighSoCAggressivePercent {
+		errs = append(errs, "HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT must be <= HIGH_SOC_AGGRESSIVE_PERCENT")
+	}
+	if c.HighSoCAggressivePercent > c.HighSoCMaxPercent {
+		errs = append(errs, "HIGH_SOC_AGGRESSIVE_PERCENT must be <= HIGH_SOC_MAX_PERCENT")
 	}
 	if c.SurplusFeedInRecoveryMinInterval < 0 {
 		errs = append(errs, "SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL must be >= 0")

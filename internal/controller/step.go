@@ -79,6 +79,11 @@ func (c *Controller) Step(ctx context.Context) error {
 		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "soc_floor")
 	}
 
+	rawTarget, highSoCStage := c.computeTarget(devStatus, smoothed)
+	if highSoCStage.active() && c.resetTopChargeIdleState("high_soc_policy") {
+		slog.Info("top-charge idle deactivated", "reason", "high_soc_policy", "soc_pct", devStatus.SOCPercent)
+	}
+
 	if c.updateTopChargeIdle(now, devStatus, sample.Watts, smoothed) {
 		c.ready = true
 		c.outputBlockedCycles = 0
@@ -87,7 +92,6 @@ func (c *Controller) Step(ctx context.Context) error {
 		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "top_charge_idle")
 	}
 
-	rawTarget := c.computeRawTarget(devStatus, smoothed)
 	if c.m != nil {
 		c.m.TargetSlotPowerWatts.Set(float64(rawTarget))
 	}
@@ -98,7 +102,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		return nil
 	}
 
-	return c.publishNormalControl(ctx, now, statusReceivedAt, devStatus, sample.Watts, smoothed, rawTarget)
+	return c.publishNormalControl(ctx, now, statusReceivedAt, devStatus, sample.Watts, smoothed, rawTarget, highSoCStage.allowExport())
 }
 
 func (c *Controller) readGridSample(ctx context.Context) (sampleWatts struct {
@@ -249,30 +253,15 @@ func (c *Controller) logFirstStatus(devStatus marstek.Status) {
 		"charging_mode", devStatus.ChargingMode,
 		"o1", devStatus.Output1Enabled, "o2", devStatus.Output2Enabled,
 		"surplus_feed_in", devStatus.SurplusFeedIn)
-	if c.cfg.NearFullIdleEnabled && !devStatus.SurplusFeedIn {
+	if c.cfg.EnforceSurplusFeedIn && c.cfg.NearFullIdleEnabled && !devStatus.SurplusFeedIn {
 		slog.Warn("surplus feed-in is disabled; full-charge pass-through idle will not engage until it is enabled")
 	}
 }
 
-func (c *Controller) computeRawTarget(devStatus marstek.Status, smoothed float64) int {
-	currentOutput := devStatus.Output1Watts + devStatus.Output2Watts
-	rawTarget := currentOutput + int(math.Round(smoothed)) - c.cfg.ImportBiasWatts
-	if rawTarget < 0 {
-		rawTarget = 0
-	}
-	if rawTarget > c.cfg.MaxOutputWatts {
-		rawTarget = c.cfg.MaxOutputWatts
-	}
-	if rawTarget > 0 && rawTarget < c.cfg.MinOutputWatts {
-		rawTarget = c.cfg.MinOutputWatts
-	}
-	return rawTarget
-}
-
-func (c *Controller) publishNormalControl(ctx context.Context, now, statusReceivedAt time.Time, devStatus marstek.Status, gridWatts, smoothed float64, rawTarget int) error {
+func (c *Controller) publishNormalControl(ctx context.Context, now, statusReceivedAt time.Time, devStatus marstek.Status, gridWatts, smoothed float64, rawTarget int, allowExport bool) error {
 	_ = ctx
 	ramped := c.applyRamp(c.lastCommandWatts, rawTarget)
-	exporting := smoothed < 0
+	exporting := smoothed < 0 && !allowExport
 	if exporting && ramped > rawTarget {
 		ramped = rawTarget
 	}

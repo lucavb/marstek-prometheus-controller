@@ -68,8 +68,17 @@ type Config struct {
 	NearFullIdleGridImportExitWatts   int
 	NearFullIdleGridImportExitSamples int
 
-	// Surplus feed-in authority. The device exposes this as a persistent setting,
-	// so automatic remediation is gated by AllowFlashWrites and rate-limited.
+	// Surplus feed-in authority. When enforcement is disabled the controller
+	// treats tc_dis=1 as intentional and will not attempt flash remediation.
+	EnforceSurplusFeedIn bool
+
+	// High-SoC discharge policy.
+	HighSoCDisableImportBiasPercent int
+	HighSoCAggressivePercent        int
+	HighSoCMaxPercent               int
+
+	// The device exposes surplus feed-in as a persistent setting, so automatic
+	// remediation is gated by AllowFlashWrites and rate-limited.
 	SurplusFeedInRecoveryMinInterval time.Duration
 
 	// Nuclear restart recovery. This is a deliberately opt-in last resort for a
@@ -127,6 +136,11 @@ type Controller struct {
 	// solar and no output. This is treated as a runtime precondition failure
 	// (outputs blocked), not as a control-law problem.
 	outputBlockedCycles int
+
+	// highSoCStage keeps the staged high-SoC policy stable across descending SoC
+	// transitions. In particular, the 97% max-output stage stays active until SoC
+	// drops below the aggressive threshold instead of flapping at 96.x%.
+	highSoCStage highSoCStage
 
 	// stuckOutputRearmPending tracks the narrow two-step recovery for B2500
 	// firmware that accepts a full-SoC timed-discharge target but leaves both

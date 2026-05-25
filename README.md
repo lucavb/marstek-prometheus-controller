@@ -17,12 +17,19 @@ Works with any `hame_energy`-protocol Marstek device (HMJ-2 and siblings).
   same broadcast your existing
    [prometheus-marstek-mqtt-exporter](https://github.com/lucavb/prometheus-marstek-mqtt-exporter)
    subscribes to — no conflict, no extra polling load).
-3. **Control law**: `next_slot_power = EMA(grid_watts) − IMPORT_BIAS_WATTS`
+3. **Control law**: by default `next_slot_power = EMA(grid_watts) − IMPORT_BIAS_WATTS`
   clamped to `[0, MAX_OUTPUT_WATTS]`, with ramp limits and a minimum hold time
-   to avoid command chatter.
-  - Grid importing (positive watts) → increase slot power (offset by bias).
-  - Grid exporting (negative watts) → reduce slot power to zero immediately
-  (ramp-down limit is bypassed when export is detected, see [Control bias](#control-bias)).
+   to avoid command chatter. At high SoC the controller deliberately changes that
+   policy to keep the battery away from the unstable 100% state; see
+   [High-SoC protection](#high-soc-protection).
+  - Normal operation: grid importing (positive watts) increases slot power,
+    offset by bias.
+  - Normal operation: grid exporting (negative watts) reduces slot power
+    immediately (ramp-down limit is bypassed when export is detected, see
+    [Control bias](#control-bias)).
+  - High SoC: the controller disables import bias at 90%, becomes more
+    aggressive at 95%, and may intentionally export at 95%+ as a trade-off to
+    avoid the bad full-charge firmware state.
 4. The full 5-slot timed-discharge schedule is published on every write
   (`cd=20`, volatile — no flash wear), with only the controlled slot's power
    changed. Other slots are preserved exactly as the device reported them.
@@ -51,7 +58,9 @@ the grid meter to exact zero. For example, with the default 50 W bias:
 The reasoning is practical: any energy the battery discharges that ends up
 exported to the grid is permanently lost. Over-importing by 50 W costs at most
 a few cents per day; accidentally exporting burns battery cycles for zero gain.
-Set `IMPORT_BIAS_WATTS=0` to disable the offset.
+Set `IMPORT_BIAS_WATTS=0` to disable the offset globally. The staged high-SoC
+policy also disables the offset automatically once SoC reaches the configured
+high-SoC threshold.
 
 **Export fast-path**
 
@@ -69,49 +78,44 @@ The same fast-path logic applies to `MIN_HOLD_TIME` and the min-delta gate: both
 so small export-driven reductions are never swallowed while the battery is
 giving energy away.
 
-## Top-charge pass-through
+## High-SoC protection
 
-At 100% SoC the battery is full, so the controller should not chatter between
-small discharge commands and zero. When the device reports surplus feed-in
-enabled (`tc_dis=0`) and there is evidence that PV can pass through firmware,
-the controller enters a small **top-charge idle** regime: it disables the
-controlled timed-discharge slot once, then stays quiet while firmware routes PV.
-That idle is no longer fire-and-forget: it must keep proving that pass-through
-or real output is still happening, otherwise the controller exits back to normal
-control and rate-limits re-entry.
+This controller is now optimized for the observed B2500 failure mode where
+surplus feed-in and full charge can push the battery into a latched state that
+accepts commands but refuses to discharge. The default policy is therefore:
 
-**Entry (debounced):** `SoC ≥ NEAR_FULL_IDLE_ENTER_PERCENT` (default `100`),
-surplus feed-in enabled, and surplus evidence for
-`NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` (default `2`) cycles. Surplus evidence is
-solar input, real output, or firmware pass-through (`p1`/`p2` bit 1). Raw or
-smoothed meaningful grid import blocks entry.
+- Treat disabled surplus feed-in (`tc_dis=1`) as a supported operating mode.
+- Keep the battery away from the unstable 100% state with staged discharge
+  rather than depending on full-charge pass-through idle.
+- Allow export in the aggressive high-SoC bands when that is the safer trade-off.
 
-**Exit:** normal control resumes when raw or smoothed grid import is
-`> NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS` (default `50 W`) for
-`NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` (default `4`) cycles, when
-pass-through/output evidence is lost for
-`NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` cycles, or when SoC is below the entry
-threshold for `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES` cycles. Failed idle attempts
-are cooldown-limited so the controller cannot immediately disable the slot
-again after normal control has just resumed.
+The default stages are:
 
-Surplus feed-in is treated as an authority invariant. If the device reports it
-disabled, the controller warns and continues normal discharge. It will re-enable
-the setting with `cd=31,touchuan_disa=0` only when `ALLOW_FLASH_WRITES=true`,
-and rate-limits that persistent write with
-`SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL`.
+- **90%+ SoC:** disable `IMPORT_BIAS_WATTS` and aim for true net zero.
+- **95%+ SoC:** choose the higher of `solar_inputs * 0.9` or the normal net-zero
+  target recomputed with zero import bias. This band may export intentionally.
+- **97%+ SoC:** command `MAX_OUTPUT_WATTS` and keep that max-output stage
+  latched until SoC falls back below `95%`.
+
+Below `90%` SoC the controller returns to the normal anti-export control law.
 
 Some B2500 firmware can still get stuck at full SoC: the timed-discharge
 threshold is accepted, but both outputs report disabled or near-zero watts while
-the house imports from the grid. When that full-SoC stuck-output signature
-persists, the controller performs a volatile controlled-slot re-arm: it disables
-only the controlled slot for one healthy cycle, then writes the desired non-zero
-slot value again. Other schedule slots are preserved, and the retry is
-cooldown-limited so the controller does not flap the device.
+the battery contributes nothing useful. When that full-SoC stuck-output
+signature persists, the controller performs a volatile controlled-slot re-arm:
+it disables only the controlled slot for one healthy cycle, then writes the
+desired non-zero slot value again. Other schedule slots are preserved, and the
+retry is cooldown-limited so the controller does not flap the device.
 
-**Kill switch:** set `NEAR_FULL_IDLE_ENABLED=false` to disable the regime
-entirely. The controller then runs normal grid-meter-driven control at all SoC
-levels.
+### Legacy top-charge idle
+
+The older pass-through idle remains available only as an opt-in legacy mode for
+operators who explicitly want to enforce surplus feed-in and keep the controller
+quiet at full charge.
+
+Enable `ENFORCE_SURPLUS_FEED_IN=true` and keep `NEAR_FULL_IDLE_ENABLED=true` if
+you want the controller to re-enable `tc_dis=0` and use the top-charge idle
+path. When surplus-feed enforcement is off, top-charge idle is skipped.
 
 ## Prerequisites
 
@@ -167,12 +171,16 @@ All settings are environment variables:
 | `BATTERY_SOC_FLOOR_MARGIN_PERCENT`        | `2`                        | Added to `(100 − device DoD%)` to derive the controller SoC soft floor. When SoC falls at or below this floor, discharge is suppressed until SoC recovers by `BATTERY_SOC_HYSTERESIS_PERCENT`.                                                                    |
 | `BATTERY_SOC_HYSTERESIS_PERCENT`          | `5`                        | Hysteresis band above the soft floor; discharge only resumes once SoC ≥ `(soft_floor + hysteresis)`. Prevents rapid on/off cycling near the floor.                                                                                                                |
 | `BATTERY_SOC_FLOOR_FALLBACK_PERCENT`      | `15`                       | Absolute SoC floor used when the device status does not report a DoD value (`do=0`).                                                                                                                                                                              |
-| `NEAR_FULL_IDLE_ENABLED`                  | `true`                     | Enable top-charge pass-through idle (see [Top-charge pass-through](#top-charge-pass-through)). Set to `false` to run normal grid-meter-driven control at all SoC levels.                                                                                         |
+| `ENFORCE_SURPLUS_FEED_IN`                 | `false`                    | When `true`, treat surplus feed-in (`tc_dis=0`) as an authority invariant and allow the controller to re-enable it via flash-gated remediation. When `false`, disabled surplus feed-in is treated as intentional and supported.                                  |
+| `HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT`    | `90`                       | At or above this SoC, disable `IMPORT_BIAS_WATTS` and aim for true net zero instead of preserving a deliberate import cushion.                                                                                                                                     |
+| `HIGH_SOC_AGGRESSIVE_PERCENT`             | `95`                       | At or above this SoC, use the higher of `solar_inputs * 0.9` or the zero-bias net-zero target. This band may intentionally export to keep the battery away from the bad full-charge state.                                                                        |
+| `HIGH_SOC_MAX_PERCENT`                    | `97`                       | At or above this SoC, command `MAX_OUTPUT_WATTS` until SoC falls back below `HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT`. This band may intentionally export.                                                                                                            |
+| `NEAR_FULL_IDLE_ENABLED`                  | `true`                     | Enable the legacy top-charge idle path described under [High-SoC protection](#high-soc-protection). This path is only relevant when `ENFORCE_SURPLUS_FEED_IN=true`; otherwise the staged high-SoC discharge policy takes precedence.                            |
 | `NEAR_FULL_IDLE_ENTER_PERCENT`            | `100`                      | SoC threshold for top-charge idle entry and SoC-based exit. The default requires a truly full battery. Must be 1–100.                                                                                                                                             |
 | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES`      | `2`                        | Debounce length (in control cycles) for top-charge idle entry and SoC exit. Must be ≥ 1.                                                                                                                                                                         |
 | `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_WATTS`   | `50`                       | Raw/smoothed grid-import threshold (W) above which an import sample is counted while top-charge idle is active. Must be ≥ 0.                                                                                                                                     |
 | `NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES` | `4`                        | Consecutive high-import samples required to exit top-charge idle via the grid-import path. Set to `0` to disable both raw-grid and smoothed-grid import exits. Must be ≥ 0.                                                                                      |
-| `SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL`    | `6h`                       | Minimum time between automatic `cd=31,touchuan_disa=0` surplus-feed-in re-enable writes. The write is still gated by `ALLOW_FLASH_WRITES=true`.                                                                                                                  |
+| `SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL`    | `6h`                       | Minimum time between automatic `cd=31,touchuan_disa=0` surplus-feed-in re-enable writes when `ENFORCE_SURPLUS_FEED_IN=true`. The write is still gated by `ALLOW_FLASH_WRITES=true`.                                                                              |
 | `DEVICE_RESTART_SCHEDULE`                 | `""` (disabled)            | **Opt-in.** 5-field UTC cron spec (e.g. `0 4` * * * for 04:00 daily). When empty the scheduler is not started and the device is never restarted by the controller. See [Scheduled device restart](#scheduled-device-restart).                                     |
 | `DEVICE_RESTART_TIMEZONE`                 | `UTC`                      | IANA timezone name for `DEVICE_RESTART_SCHEDULE` (e.g. `Europe/Berlin`). Ignored when `DEVICE_RESTART_SCHEDULE` is empty.                                                                                                                                         |
 | `NUCLEAR_RESTART_ENABLED`                 | `false`                    | **Dangerous opt-in.** Allow stuck-inverter recovery to publish `cd=10` only after sustained blocked-output evidence and normal authority remediation. See [Nuclear restart recovery](#nuclear-restart-recovery).                                                   |
@@ -352,7 +360,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | `fallback_total`                   | Counter   | `reason`    | Fallback events (prometheus_error, prometheus_stale, mqtt_status_stale, mqtt_write_error)                                                      |
 | `top_charge_idle_entered_total`    | Counter   |             | Times top-charge idle has been activated (rising edge)                                                                                         |
 | `top_charge_idle_exited_total`     | Counter   |             | Times top-charge idle has been deactivated (falling edge)                                                                                      |
-| `top_charge_idle_exit_reason_total`| Counter   | `reason`    | Reason-specific exits from top-charge idle (`soc_exit`, `grid_import`, `raw_grid_import`, `passthrough_lost`, `fallback`, `surplus_feed_in_disabled`, `disabled`, `soc_floor`) |
+| `top_charge_idle_exit_reason_total`| Counter   | `reason`    | Reason-specific exits from top-charge idle (`soc_exit`, `grid_import`, `raw_grid_import`, `passthrough_lost`, `fallback`, `surplus_feed_in_disabled`, `surplus_feed_in_policy_disabled`, `high_soc_policy`, `disabled`, `soc_floor`) |
 | `authority_remediation_total`      | Counter   | `kind`,`outcome` | Authority remediation actions such as `charging_mode`, `controlled_slot`, `output_enable`, `surplus_feed_in`, and `stuck_output_rearm`      |
 | `nuclear_restart_total`            | Counter   | `outcome`   | Nuclear stuck-inverter restart recovery outcomes                                                                                               |
 | `last_nuclear_restart_timestamp_seconds` | Gauge |             | Unix timestamp of the last successful nuclear restart command                                                                                  |
@@ -361,10 +369,9 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 
 ### Migration: top-charge controller surface
 
-The previous `full-battery override`, broad near-full idle, and pass-through
-recovery surfaces have been collapsed into [Top-charge pass-through](#top-charge-pass-through)
-and authority remediation. The controller no longer commands special high-power
-top-band discharge or temporarily disables surplus feed-in as a recovery step.
+The controller now defaults to staged high-SoC discharge instead of relying on
+full-charge pass-through idle. Legacy top-charge idle remains available only
+when `ENFORCE_SURPLUS_FEED_IN=true` and `NEAR_FULL_IDLE_ENABLED=true`.
 
 If you have dashboards or alerts referencing the old surface, replace them as
 follows:

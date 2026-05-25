@@ -253,6 +253,18 @@ func TestLoad_StabilityDefaults(t *testing.T) {
 	if cfg.NearFullIdleGridImportExitSamples != 4 {
 		t.Errorf("NearFullIdleGridImportExitSamples default = %d, want 4", cfg.NearFullIdleGridImportExitSamples)
 	}
+	if cfg.EnforceSurplusFeedIn {
+		t.Error("EnforceSurplusFeedIn default = true, want false")
+	}
+	if cfg.HighSoCDisableImportBiasPercent != 90 {
+		t.Errorf("HighSoCDisableImportBiasPercent default = %d, want 90", cfg.HighSoCDisableImportBiasPercent)
+	}
+	if cfg.HighSoCAggressivePercent != 95 {
+		t.Errorf("HighSoCAggressivePercent default = %d, want 95", cfg.HighSoCAggressivePercent)
+	}
+	if cfg.HighSoCMaxPercent != 97 {
+		t.Errorf("HighSoCMaxPercent default = %d, want 97", cfg.HighSoCMaxPercent)
+	}
 	if cfg.SurplusFeedInRecoveryMinInterval != 6*time.Hour {
 		t.Errorf("SurplusFeedInRecoveryMinInterval default = %v, want 6h", cfg.SurplusFeedInRecoveryMinInterval)
 	}
@@ -263,6 +275,10 @@ func TestLoad_TopChargeIdleConfig(t *testing.T) {
 		setRequired(t)
 		t.Setenv("NEAR_FULL_IDLE_ENTER_PERCENT", "99")
 		t.Setenv("NEAR_FULL_IDLE_GRID_IMPORT_EXIT_SAMPLES", "3")
+		t.Setenv("ENFORCE_SURPLUS_FEED_IN", "true")
+		t.Setenv("HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT", "88")
+		t.Setenv("HIGH_SOC_AGGRESSIVE_PERCENT", "93")
+		t.Setenv("HIGH_SOC_MAX_PERCENT", "98")
 		t.Setenv("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", "30m")
 		cfg, err := config.Load()
 		if err != nil {
@@ -273,6 +289,18 @@ func TestLoad_TopChargeIdleConfig(t *testing.T) {
 		}
 		if cfg.NearFullIdleGridImportExitSamples != 3 {
 			t.Errorf("NearFullIdleGridImportExitSamples = %d, want 3", cfg.NearFullIdleGridImportExitSamples)
+		}
+		if !cfg.EnforceSurplusFeedIn {
+			t.Error("EnforceSurplusFeedIn = false, want true")
+		}
+		if cfg.HighSoCDisableImportBiasPercent != 88 {
+			t.Errorf("HighSoCDisableImportBiasPercent = %d, want 88", cfg.HighSoCDisableImportBiasPercent)
+		}
+		if cfg.HighSoCAggressivePercent != 93 {
+			t.Errorf("HighSoCAggressivePercent = %d, want 93", cfg.HighSoCAggressivePercent)
+		}
+		if cfg.HighSoCMaxPercent != 98 {
+			t.Errorf("HighSoCMaxPercent = %d, want 98", cfg.HighSoCMaxPercent)
 		}
 		if cfg.SurplusFeedInRecoveryMinInterval != 30*time.Minute {
 			t.Errorf("SurplusFeedInRecoveryMinInterval = %v, want 30m", cfg.SurplusFeedInRecoveryMinInterval)
@@ -288,6 +316,20 @@ func TestLoad_TopChargeIdleConfig(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL must be >= 0") {
 			t.Errorf("error = %q, want SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL validation", err.Error())
+		}
+	})
+
+	t.Run("invalid_high_soc_order", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT", "96")
+		t.Setenv("HIGH_SOC_AGGRESSIVE_PERCENT", "95")
+		t.Setenv("HIGH_SOC_MAX_PERCENT", "94")
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() expected error for invalid high-SoC threshold order, got nil")
+		}
+		if !strings.Contains(err.Error(), "HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT must be <= HIGH_SOC_AGGRESSIVE_PERCENT") {
+			t.Errorf("error = %q, want high-SoC order validation", err.Error())
 		}
 	})
 }

@@ -81,6 +81,11 @@ func (c *Controller) ensureDeviceConfig(now, observedAt time.Time, devStatus mar
 
 func (c *Controller) ensureSurplusFeedIn(now time.Time, devStatus marstek.Status) (bool, error) {
 	payload := marstek.BuildSurplusFeedInPayload(true)
+	if !c.cfg.EnforceSurplusFeedIn {
+		c.loggedSurplusFeedInBlocked = false
+		c.clearPendingAuthorityPayload(payload)
+		return false, nil
+	}
 	if devStatus.SurplusFeedIn {
 		c.loggedSurplusFeedInBlocked = false
 		c.clearPendingAuthorityPayload(payload)
@@ -140,7 +145,7 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 	solarInputWatts := devStatus.Solar1Watts + devStatus.Solar2Watts
 	batteryContributionWatts := currentOutputWatts - solarInputWatts
 	if c.stuckOutputRearmPending {
-		if !c.fullSoCStuckOutputCandidate(devStatus, desiredWatts, smoothed, currentOutputWatts) {
+		if !c.fullSoCStuckOutputCandidate(devStatus, desiredWatts, currentOutputWatts) {
 			c.clearStuckOutputRearm()
 		} else {
 			handled, err := c.maybeCompleteStuckOutputRearm(now, statusSlotWatts(desiredWatts, c.stuckOutputRearmWatts), devStatus, currentOutputWatts, smoothed)
@@ -201,11 +206,8 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 	return handled, err
 }
 
-func (c *Controller) fullSoCStuckOutputCandidate(devStatus marstek.Status, desiredWatts int, smoothed float64, currentOutputWatts int) bool {
+func (c *Controller) fullSoCStuckOutputCandidate(devStatus marstek.Status, desiredWatts int, currentOutputWatts int) bool {
 	if desiredWatts <= 0 || devStatus.SOCPercent < 100 {
-		return false
-	}
-	if smoothed <= float64(c.cfg.ImportBiasWatts) {
 		return false
 	}
 	nearZeroLimit := c.cfg.MinOutputWatts / 2
@@ -227,7 +229,7 @@ func (c *Controller) maybeStartStuckOutputRearm(now time.Time, devStatus marstek
 	if c.outputBlockedCycles < 2 {
 		return false, nil
 	}
-	if !c.fullSoCStuckOutputCandidate(devStatus, desiredWatts, smoothed, currentOutputWatts) {
+	if !c.fullSoCStuckOutputCandidate(devStatus, desiredWatts, currentOutputWatts) {
 		return false, nil
 	}
 	cooldown := c.stuckOutputRearmCooldown()

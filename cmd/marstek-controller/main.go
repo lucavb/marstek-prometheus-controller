@@ -137,6 +137,10 @@ func run() error {
 		NearFullIdleGridImportExitWatts:   cfg.NearFullIdleGridImportExitWatts,
 		NearFullIdleGridImportExitSamples: cfg.NearFullIdleGridImportExitSamples,
 
+		EnforceSurplusFeedIn:             cfg.EnforceSurplusFeedIn,
+		HighSoCDisableImportBiasPercent:  cfg.HighSoCDisableImportBiasPercent,
+		HighSoCAggressivePercent:         cfg.HighSoCAggressivePercent,
+		HighSoCMaxPercent:                cfg.HighSoCMaxPercent,
 		SurplusFeedInRecoveryMinInterval: cfg.SurplusFeedInRecoveryMinInterval,
 
 		NuclearRestartEnabled:         cfg.NuclearRestartEnabled,

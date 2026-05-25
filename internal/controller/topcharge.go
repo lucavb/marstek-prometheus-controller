@@ -20,6 +20,12 @@ func (c *Controller) updateTopChargeIdle(now time.Time, devStatus marstek.Status
 		}
 		return false
 	}
+	if !c.cfg.EnforceSurplusFeedIn {
+		if c.resetTopChargeIdleState("surplus_feed_in_policy_disabled") {
+			slog.Info("top-charge idle deactivated", "reason", "surplus_feed_in_policy_disabled")
+		}
+		return false
+	}
 	if !devStatus.SurplusFeedIn {
 		if c.resetTopChargeIdleState("surplus_feed_in_disabled") {
 			slog.Info("top-charge idle deactivated", "reason", "surplus_feed_in_disabled")
