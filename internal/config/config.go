@@ -86,6 +86,7 @@ type Config struct {
 	HighSoCDisableImportBiasPercent int
 	HighSoCAggressivePercent        int
 	HighSoCMaxPercent               int
+	HighSoCSolarTraceFactor         float64
 
 	// Surplus feed-in recovery writes a persistent device setting, so it is
 	// gated by ALLOW_FLASH_WRITES, policy opt-in, and a long rate limit.
@@ -163,6 +164,7 @@ func Load() (Config, error) {
 		HighSoCDisableImportBiasPercent:  getEnvInt("HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT", 90),
 		HighSoCAggressivePercent:         getEnvInt("HIGH_SOC_AGGRESSIVE_PERCENT", 95),
 		HighSoCMaxPercent:                getEnvInt("HIGH_SOC_MAX_PERCENT", 97),
+		HighSoCSolarTraceFactor:          getEnvFloat("HIGH_SOC_SOLAR_TRACE_FACTOR", 0.9),
 		SurplusFeedInRecoveryMinInterval: getEnvDuration("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", 6*time.Hour),
 
 		DeviceRestartSchedule: getEnv("DEVICE_RESTART_SCHEDULE", ""),
@@ -274,6 +276,9 @@ func (c *Config) validate() error {
 	}
 	if c.HighSoCMaxPercent < 1 || c.HighSoCMaxPercent > 100 {
 		errs = append(errs, "HIGH_SOC_MAX_PERCENT must be 1–100")
+	}
+	if c.HighSoCSolarTraceFactor <= 0 || c.HighSoCSolarTraceFactor > 1 {
+		errs = append(errs, "HIGH_SOC_SOLAR_TRACE_FACTOR must be > 0 and <= 1")
 	}
 	if c.HighSoCDisableImportBiasPercent > c.HighSoCAggressivePercent {
 		errs = append(errs, "HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT must be <= HIGH_SOC_AGGRESSIVE_PERCENT")

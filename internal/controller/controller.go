@@ -76,6 +76,7 @@ type Config struct {
 	HighSoCDisableImportBiasPercent int
 	HighSoCAggressivePercent        int
 	HighSoCMaxPercent               int
+	HighSoCSolarTraceFactor         float64
 
 	// The device exposes surplus feed-in as a persistent setting, so automatic
 	// remediation is gated by AllowFlashWrites and rate-limited.

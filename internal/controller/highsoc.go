@@ -92,7 +92,7 @@ func (c *Controller) computeTarget(devStatus marstek.Status, smoothed float64) (
 		return c.computeRawTargetWithBias(devStatus, smoothed, 0), stage
 	case highSoCStageAggressive:
 		zeroBiasTarget := c.computeRawTargetWithBias(devStatus, smoothed, 0)
-		solarTraceTarget := int(math.Round(float64(devStatus.Solar1Watts+devStatus.Solar2Watts) * 0.9))
+		solarTraceTarget := int(math.Round(float64(devStatus.Solar1Watts+devStatus.Solar2Watts) * c.cfg.HighSoCSolarTraceFactor))
 		return c.clampTargetWatts(max(zeroBiasTarget, solarTraceTarget)), stage
 	case highSoCStageMax:
 		return c.cfg.MaxOutputWatts, stage

@@ -91,11 +91,15 @@ accepts commands but refuses to discharge. The default policy is therefore:
 
 The default stages are:
 
-- **90%+ SoC:** disable `IMPORT_BIAS_WATTS` and aim for true net zero.
-- **95%+ SoC:** choose the higher of `solar_inputs * 0.9` or the normal net-zero
-  target recomputed with zero import bias. This band may export intentionally.
-- **97%+ SoC:** command `MAX_OUTPUT_WATTS` and keep that max-output stage
-  latched until SoC falls back below `95%`.
+- **`HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT`+ SoC** (default `90`): disable
+  `IMPORT_BIAS_WATTS` and aim for true net zero.
+- **`HIGH_SOC_AGGRESSIVE_PERCENT`+ SoC** (default `95`): choose the higher of
+  `solar_inputs * HIGH_SOC_SOLAR_TRACE_FACTOR` (default `0.9`) or the normal
+  net-zero target recomputed with zero import bias. This band may export
+  intentionally.
+- **`HIGH_SOC_MAX_PERCENT`+ SoC** (default `97`): command `MAX_OUTPUT_WATTS`
+  and keep that max-output stage latched until SoC falls back below
+  `HIGH_SOC_AGGRESSIVE_PERCENT`.
 
 Below `90%` SoC the controller returns to the normal anti-export control law.
 
@@ -173,8 +177,9 @@ All settings are environment variables:
 | `BATTERY_SOC_FLOOR_FALLBACK_PERCENT`      | `15`                       | Absolute SoC floor used when the device status does not report a DoD value (`do=0`).                                                                                                                                                                              |
 | `ENFORCE_SURPLUS_FEED_IN`                 | `false`                    | When `true`, treat surplus feed-in (`tc_dis=0`) as an authority invariant and allow the controller to re-enable it via flash-gated remediation. When `false`, disabled surplus feed-in is treated as intentional and supported.                                  |
 | `HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT`    | `90`                       | At or above this SoC, disable `IMPORT_BIAS_WATTS` and aim for true net zero instead of preserving a deliberate import cushion.                                                                                                                                     |
-| `HIGH_SOC_AGGRESSIVE_PERCENT`             | `95`                       | At or above this SoC, use the higher of `solar_inputs * 0.9` or the zero-bias net-zero target. This band may intentionally export to keep the battery away from the bad full-charge state.                                                                        |
-| `HIGH_SOC_MAX_PERCENT`                    | `97`                       | At or above this SoC, command `MAX_OUTPUT_WATTS` until SoC falls back below `HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT`. This band may intentionally export.                                                                                                            |
+| `HIGH_SOC_AGGRESSIVE_PERCENT`             | `95`                       | At or above this SoC, use the higher of `solar_inputs * HIGH_SOC_SOLAR_TRACE_FACTOR` or the zero-bias net-zero target. This band may intentionally export to keep the battery away from the bad full-charge state.                                                |
+| `HIGH_SOC_MAX_PERCENT`                    | `97`                       | At or above this SoC, command `MAX_OUTPUT_WATTS` until SoC falls back below `HIGH_SOC_AGGRESSIVE_PERCENT`. This band may intentionally export.                                                                                                                     |
+| `HIGH_SOC_SOLAR_TRACE_FACTOR`             | `0.9`                      | Multiplier applied to `solar_inputs` inside the aggressive high-SoC band before comparing it with the zero-bias net-zero target. Must be `> 0` and `<= 1`.                                                                                                         |
 | `NEAR_FULL_IDLE_ENABLED`                  | `true`                     | Enable the legacy top-charge idle path described under [High-SoC protection](#high-soc-protection). This path is only relevant when `ENFORCE_SURPLUS_FEED_IN=true`; otherwise the staged high-SoC discharge policy takes precedence.                            |
 | `NEAR_FULL_IDLE_ENTER_PERCENT`            | `100`                      | SoC threshold for top-charge idle entry and SoC-based exit. The default requires a truly full battery. Must be 1–100.                                                                                                                                             |
 | `NEAR_FULL_IDLE_CONSECUTIVE_SAMPLES`      | `2`                        | Debounce length (in control cycles) for top-charge idle entry and SoC exit. Must be ≥ 1.                                                                                                                                                                         |

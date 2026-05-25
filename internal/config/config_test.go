@@ -265,6 +265,9 @@ func TestLoad_StabilityDefaults(t *testing.T) {
 	if cfg.HighSoCMaxPercent != 97 {
 		t.Errorf("HighSoCMaxPercent default = %d, want 97", cfg.HighSoCMaxPercent)
 	}
+	if cfg.HighSoCSolarTraceFactor != 0.9 {
+		t.Errorf("HighSoCSolarTraceFactor default = %v, want 0.9", cfg.HighSoCSolarTraceFactor)
+	}
 	if cfg.SurplusFeedInRecoveryMinInterval != 6*time.Hour {
 		t.Errorf("SurplusFeedInRecoveryMinInterval default = %v, want 6h", cfg.SurplusFeedInRecoveryMinInterval)
 	}
@@ -279,6 +282,7 @@ func TestLoad_TopChargeIdleConfig(t *testing.T) {
 		t.Setenv("HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT", "88")
 		t.Setenv("HIGH_SOC_AGGRESSIVE_PERCENT", "93")
 		t.Setenv("HIGH_SOC_MAX_PERCENT", "98")
+		t.Setenv("HIGH_SOC_SOLAR_TRACE_FACTOR", "0.75")
 		t.Setenv("SURPLUS_FEEDIN_RECOVERY_MIN_INTERVAL", "30m")
 		cfg, err := config.Load()
 		if err != nil {
@@ -301,6 +305,9 @@ func TestLoad_TopChargeIdleConfig(t *testing.T) {
 		}
 		if cfg.HighSoCMaxPercent != 98 {
 			t.Errorf("HighSoCMaxPercent = %d, want 98", cfg.HighSoCMaxPercent)
+		}
+		if cfg.HighSoCSolarTraceFactor != 0.75 {
+			t.Errorf("HighSoCSolarTraceFactor = %v, want 0.75", cfg.HighSoCSolarTraceFactor)
 		}
 		if cfg.SurplusFeedInRecoveryMinInterval != 30*time.Minute {
 			t.Errorf("SurplusFeedInRecoveryMinInterval = %v, want 30m", cfg.SurplusFeedInRecoveryMinInterval)
@@ -330,6 +337,18 @@ func TestLoad_TopChargeIdleConfig(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "HIGH_SOC_DISABLE_IMPORT_BIAS_PERCENT must be <= HIGH_SOC_AGGRESSIVE_PERCENT") {
 			t.Errorf("error = %q, want high-SoC order validation", err.Error())
+		}
+	})
+
+	t.Run("invalid_solar_trace_factor", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("HIGH_SOC_SOLAR_TRACE_FACTOR", "1.2")
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() expected error for invalid solar trace factor, got nil")
+		}
+		if !strings.Contains(err.Error(), "HIGH_SOC_SOLAR_TRACE_FACTOR must be > 0 and <= 1") {
+			t.Errorf("error = %q, want solar trace factor validation", err.Error())
 		}
 	})
 }

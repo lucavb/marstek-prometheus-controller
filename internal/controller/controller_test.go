@@ -152,6 +152,7 @@ func defaultCfg(ctrl, start, end string) controller.Config {
 		HighSoCDisableImportBiasPercent:   101,
 		HighSoCAggressivePercent:          101,
 		HighSoCMaxPercent:                 101,
+		HighSoCSolarTraceFactor:           0.9,
 		SurplusFeedInRecoveryMinInterval:  time.Hour,
 		BatterySoCFloorMarginPercent:      2,
 		BatterySoCHysteresisPercent:       5,
@@ -433,6 +434,29 @@ func TestStep_HighSoC95UsesMoreAggressiveTarget(t *testing.T) {
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=360,") {
 		t.Fatalf("expected aggressive 95%% target using solar-trace candidate, got %q", got)
+	}
+}
+
+func TestStep_HighSoC95UsesConfigurableSolarTraceFactor(t *testing.T) {
+	p := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.EnforceSurplusFeedIn = false
+	cfg.ImportBiasWatts = 50
+	cfg.HighSoCDisableImportBiasPercent = 90
+	cfg.HighSoCAggressivePercent = 95
+	cfg.HighSoCMaxPercent = 97
+	cfg.HighSoCSolarTraceFactor = 0.5
+
+	p.set(100, 0)
+	st.setFresh(statusWith(95, 200, 200, 0, 0, false))
+	c := controller.New(cfg, p, pub, st, clk, nil)
+
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=200,") {
+		t.Fatalf("expected aggressive 95%% target using configurable solar factor, got %q", got)
 	}
 }
 

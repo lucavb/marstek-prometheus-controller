@@ -141,6 +141,7 @@ func run() error {
 		HighSoCDisableImportBiasPercent:  cfg.HighSoCDisableImportBiasPercent,
 		HighSoCAggressivePercent:         cfg.HighSoCAggressivePercent,
 		HighSoCMaxPercent:                cfg.HighSoCMaxPercent,
+		HighSoCSolarTraceFactor:          cfg.HighSoCSolarTraceFactor,
 		SurplusFeedInRecoveryMinInterval: cfg.SurplusFeedInRecoveryMinInterval,
 
 		NuclearRestartEnabled:         cfg.NuclearRestartEnabled,
