@@ -93,12 +93,12 @@ type Config struct {
 
 // Controller is the main control loop.
 type Controller struct {
-	cfg    Config
-	prom   PromReader
-	pub    Publisher
-	status StatusSource
-	clock  Clock
-	m      *metrics.Metrics
+	cfg      Config
+	gridProm GridPromReader
+	pub      Publisher
+	status   StatusSource
+	clock    Clock
+	m        *metrics.Metrics
 
 	// State
 	smoothed                float64
@@ -160,17 +160,17 @@ type Controller struct {
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil
 // (defaults to RealClock).
-func New(cfg Config, prom PromReader, pub Publisher, status StatusSource, clock Clock, m *metrics.Metrics) *Controller {
+func New(cfg Config, gridProm GridPromReader, pub Publisher, status StatusSource, clock Clock, m *metrics.Metrics) *Controller {
 	if clock == nil {
 		clock = RealClock{}
 	}
 	c := &Controller{
-		cfg:    cfg,
-		prom:   prom,
-		pub:    pub,
-		status: status,
-		clock:  clock,
-		m:      m,
+		cfg:      cfg,
+		gridProm: gridProm,
+		pub:      pub,
+		status:   status,
+		clock:    clock,
+		m:        m,
 	}
 	if m != nil {
 		m.SlotIndex.Set(float64(cfg.ScheduleSlot))

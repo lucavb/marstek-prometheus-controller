@@ -60,7 +60,12 @@ func run() error {
 	m := metrics.New(cfg.MarstekDeviceID, cfg.MarstekDeviceType, cfg.MQTTBrokerURL, version)
 
 	// Prometheus client.
-	prom := promclient.New(cfg.PrometheusBaseURL, cfg.PrometheusQuery, cfg.PrometheusTimeout)
+	prom := promclient.NewGridPowerReader(
+		cfg.PrometheusBaseURL,
+		cfg.PrometheusQuery,
+		cfg.PrometheusFallbackQuery,
+		cfg.PrometheusTimeout,
+	)
 
 	// MQTT client.
 	ctrlTopic := marstek.ControlTopic(cfg.MarstekDeviceType, cfg.MarstekDeviceID)

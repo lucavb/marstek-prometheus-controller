@@ -10,6 +10,7 @@ import (
 
 	"github.com/lucavb/marstek-prometheus-controller/internal/marstek"
 	"github.com/lucavb/marstek-prometheus-controller/internal/metrics"
+	"github.com/lucavb/marstek-prometheus-controller/internal/promclient"
 )
 
 var errStepHandled = errors.New("controller step handled")
@@ -112,34 +113,74 @@ func (c *Controller) readGridSample(ctx context.Context) (sampleWatts struct {
 	if c.m != nil {
 		c.m.PrometheusQueriesTotal.Inc()
 	}
-	sample, promErr := c.prom.Query(ctx)
+	sample, promErr := c.gridProm.QueryPrimary(ctx)
 	now = c.clock.Now()
+	if promErr == nil && now.Sub(sample.SampleTime) <= c.cfg.PrometheusStaleAfter {
+		return c.acceptGridSample(sample, now, metrics.GridPowerSourcePrimary)
+	}
+
 	if promErr != nil {
 		slog.Warn("prometheus query failed", "err", promErr)
 		if c.m != nil {
 			c.m.PrometheusErrorsTotal.WithLabelValues(classifyPromError(promErr)).Inc()
-			c.m.PrometheusUp.Set(0)
 		}
-		if err := c.fallback(ctx, "prometheus_error"); err != nil {
-			return sampleWatts, now, err
-		}
-		return sampleWatts, now, errStepHandled
-	}
-	if now.Sub(sample.SampleTime) > c.cfg.PrometheusStaleAfter {
+	} else {
 		slog.Warn("prometheus sample is stale",
 			"age", now.Sub(sample.SampleTime).Round(time.Second),
 			"threshold", c.cfg.PrometheusStaleAfter)
 		if c.m != nil {
 			c.m.PrometheusErrorsTotal.WithLabelValues("stale").Inc()
-			c.m.PrometheusUp.Set(0)
 		}
-		if err := c.fallback(ctx, "prometheus_stale"); err != nil {
-			return sampleWatts, now, err
-		}
-		return sampleWatts, now, errStepHandled
 	}
+
+	if c.gridProm.FallbackEnabled() {
+		if c.m != nil {
+			c.m.PrometheusQueriesTotal.Inc()
+		}
+		fallbackSample, fallbackErr := c.gridProm.QueryFallback(ctx)
+		now = c.clock.Now()
+		if fallbackErr == nil && now.Sub(fallbackSample.SampleTime) <= c.cfg.PrometheusStaleAfter {
+			slog.Info("using plug-sum grid power fallback",
+				"grid_power_watts", fallbackSample.Watts,
+				"grid_power_source", "fallback")
+			return c.acceptGridSample(fallbackSample, now, metrics.GridPowerSourceFallback)
+		}
+		if fallbackErr != nil {
+			slog.Warn("prometheus fallback query failed", "err", fallbackErr)
+			if c.m != nil {
+				c.m.PrometheusErrorsTotal.WithLabelValues(classifyPromError(fallbackErr)).Inc()
+			}
+		} else {
+			slog.Warn("prometheus fallback sample is stale",
+				"age", now.Sub(fallbackSample.SampleTime).Round(time.Second),
+				"threshold", c.cfg.PrometheusStaleAfter)
+			if c.m != nil {
+				c.m.PrometheusErrorsTotal.WithLabelValues("stale").Inc()
+			}
+		}
+	}
+
+	if c.m != nil {
+		c.m.PrometheusUp.Set(0)
+		c.m.GridPowerSource.Set(float64(metrics.GridPowerSourceNone))
+	}
+	reason := "prometheus_stale"
+	if promErr != nil {
+		reason = "prometheus_error"
+	}
+	if err := c.fallback(ctx, reason); err != nil {
+		return sampleWatts, now, err
+	}
+	return sampleWatts, now, errStepHandled
+}
+
+func (c *Controller) acceptGridSample(sample promclient.Sample, now time.Time, source metrics.GridPowerSource) (struct {
+	Watts      float64
+	SampleTime time.Time
+}, time.Time, error) {
 	if c.m != nil {
 		c.m.GridPowerWatts.Set(sample.Watts)
+		c.m.GridPowerSource.Set(float64(source))
 		c.m.RecordLastPrometheusSuccess(now)
 	}
 	return struct {

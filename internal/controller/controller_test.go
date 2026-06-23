@@ -34,6 +34,36 @@ func (f *fakeProm) set(watts float64, age time.Duration) {
 	f.err = nil
 }
 
+func (f *fakeProm) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+type fakeGridProm struct {
+	primary  *fakeProm
+	fallback *fakeProm
+}
+
+func gridProm(primary *fakeProm, fallback *fakeProm) *fakeGridProm {
+	return &fakeGridProm{primary: primary, fallback: fallback}
+}
+
+func (f *fakeGridProm) QueryPrimary(ctx context.Context) (promclient.Sample, error) {
+	return f.primary.Query(ctx)
+}
+
+func (f *fakeGridProm) QueryFallback(ctx context.Context) (promclient.Sample, error) {
+	if f.fallback == nil {
+		return promclient.Sample{}, promclient.ErrEmptyResult
+	}
+	return f.fallback.Query(ctx)
+}
+
+func (f *fakeGridProm) FallbackEnabled() bool {
+	return f.fallback != nil
+}
+
 type fakePublisher struct {
 	mu       sync.Mutex
 	payloads []string
@@ -200,7 +230,7 @@ func TestStep_NormalImportPublishesDischarge(t *testing.T) {
 
 	p.set(200, 0)
 	st.setFresh(statusWith(80, 0, 0, 0, 0, true))
-	c := controller.New(defaultCfg("topic", "00:00", "23:59"), p, pub, st, clk, nil)
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(p, nil), pub, st, clk, nil)
 
 	if err := c.Step(context.Background()); err != nil {
 		t.Fatalf("Step() error = %v", err)
@@ -219,7 +249,7 @@ func TestStep_ExportFastPathStopsDischarge(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	p.set(300, 0)
 	st.setFresh(statusWith(80, 0, 0, 0, 0, true))
@@ -244,7 +274,65 @@ func TestStep_PrometheusStaleFallsBackToZero(t *testing.T) {
 
 	p.set(200, 2*time.Minute)
 	st.setFresh(withControlledSlot(statusWith(80, 0, 0, 200, 0, true), true, 200))
-	c := controller.New(defaultCfg("topic", "00:00", "23:59"), p, pub, st, clk, nil)
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(p, nil), pub, st, clk, nil)
+
+	_ = c.Step(context.Background())
+	if got := pub.last(); !strings.Contains(got, ",a1=0,") || !strings.Contains(got, ",v1=0,") {
+		t.Fatalf("expected fallback zero payload, got %q", got)
+	}
+}
+
+func TestStep_PrometheusEmptyUsesPlugFallback(t *testing.T) {
+	primary := &fakeProm{}
+	fallback := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	primary.setErr(promclient.ErrEmptyResult)
+	fallback.set(180, 0)
+	st.setFresh(statusWith(80, 0, 0, 0, 0, true))
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(primary, fallback), pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=180,") {
+		t.Fatalf("expected 180 W discharge from plug fallback, got %q", got)
+	}
+}
+
+func TestStep_PrometheusStaleUsesPlugFallback(t *testing.T) {
+	primary := &fakeProm{}
+	fallback := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	primary.set(900, 2*time.Minute)
+	fallback.set(165, 0)
+	st.setFresh(statusWith(80, 0, 0, 0, 0, true))
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(primary, fallback), pub, st, clk, nil)
+
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=165,") {
+		t.Fatalf("expected 165 W discharge from plug fallback, got %q", got)
+	}
+}
+
+func TestStep_PrometheusAndPlugFallbackFailZeroDischarge(t *testing.T) {
+	primary := &fakeProm{}
+	fallback := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	primary.setErr(promclient.ErrEmptyResult)
+	fallback.setErr(promclient.ErrEmptyResult)
+	st.setFresh(withControlledSlot(statusWith(80, 0, 0, 200, 0, true), true, 200))
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(primary, fallback), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=0,") || !strings.Contains(got, ",v1=0,") {
@@ -262,7 +350,7 @@ func TestStep_StatusHardFailFallsBackToZero(t *testing.T) {
 	st.receivedAt = clk.now.Add(-10 * time.Minute)
 	p.set(200, 0)
 
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=0,") || !strings.Contains(got, ",v1=0,") {
 		t.Fatalf("expected fallback zero payload, got %q", got)
@@ -277,7 +365,7 @@ func TestStep_SoCFloorDisablesControlledSlot(t *testing.T) {
 
 	p.set(200, 0)
 	st.setFresh(withControlledSlot(statusWith(10, 0, 0, 200, 0, true), true, 200))
-	c := controller.New(defaultCfg("topic", "00:00", "23:59"), p, pub, st, clk, nil)
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=0,") || !strings.Contains(got, ",v1=0,") {
@@ -295,7 +383,7 @@ func TestStep_AuthorityRemediatesChargingModeBeforeControl(t *testing.T) {
 	status.ChargingMode = 1
 	p.set(200, 0)
 	st.setFresh(status)
-	c := controller.New(defaultCfg("topic", "00:00", "23:59"), p, pub, st, clk, nil)
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); got != "cd=17,md=0" {
@@ -313,7 +401,7 @@ func TestStep_AuthorityEnablesSurplusFeedInWithFlashGuard(t *testing.T) {
 
 	p.set(200, 0)
 	st.setFresh(statusWith(80, 0, 0, 0, 0, false))
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); got != "cd=31,touchuan_disa=0" {
@@ -334,7 +422,7 @@ func TestStep_AuthorityDoesNotEnableSurplusFeedInWithoutFlashGuard(t *testing.T)
 
 	p.set(200, 0)
 	st.setFresh(statusWith(80, 0, 0, 0, 0, false))
-	c := controller.New(defaultCfg("topic", "00:00", "23:59"), p, pub, st, clk, nil)
+	c := controller.New(defaultCfg("topic", "00:00", "23:59"), gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if pub.countContaining("cd=31") != 0 {
@@ -356,7 +444,7 @@ func TestStep_AuthorityRateLimitsSurplusFeedInRecovery(t *testing.T) {
 
 	p.set(200, 0)
 	st.setFresh(statusWith(80, 0, 0, 0, 0, false))
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	clk.advance(cfg.ControlInterval)
@@ -382,7 +470,7 @@ func TestStep_DisabledSurplusPolicyDoesNotAutoReenableFeedIn(t *testing.T) {
 
 	p.set(200, 0)
 	st.setFresh(statusWith(80, 0, 0, 0, 0, false))
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.countContaining("cd=31,touchuan_disa=0"); got != 0 {
@@ -407,7 +495,7 @@ func TestStep_HighSoC90DisablesImportBias(t *testing.T) {
 
 	p.set(200, 0)
 	st.setFresh(statusWith(90, 0, 0, 0, 0, false))
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=200,") {
@@ -429,7 +517,7 @@ func TestStep_HighSoC95UsesMoreAggressiveTarget(t *testing.T) {
 
 	p.set(100, 0)
 	st.setFresh(statusWith(95, 200, 200, 0, 0, false))
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=360,") {
@@ -452,7 +540,7 @@ func TestStep_HighSoC95UsesConfigurableSolarTraceFactor(t *testing.T) {
 
 	p.set(100, 0)
 	st.setFresh(statusWith(95, 200, 200, 0, 0, false))
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=200,") {
@@ -474,7 +562,7 @@ func TestStep_HighSoC97ForcesMaxOutputAndSkipsTopChargeIdle(t *testing.T) {
 
 	p.set(-300, 0)
 	st.setFresh(passThroughStatus(100, 300, 300, 0, 0, false))
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	_ = c.Step(context.Background())
 	if got := pub.last(); !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=800,") {
@@ -496,7 +584,7 @@ func TestStep_HighSoC97StaysLatchedUntilBelowNinetyFiveSoC(t *testing.T) {
 	cfg.HighSoCDisableImportBiasPercent = 90
 	cfg.HighSoCAggressivePercent = 95
 	cfg.HighSoCMaxPercent = 97
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	p.set(-300, 0)
 	st.setFresh(statusWith(97, 0, 0, 0, 0, false))
@@ -546,7 +634,7 @@ func TestStep_HighSoCTransitionsAreLogged(t *testing.T) {
 	cfg.HighSoCDisableImportBiasPercent = 90
 	cfg.HighSoCAggressivePercent = 95
 	cfg.HighSoCMaxPercent = 97
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for _, tc := range []struct {
 		soc  int
@@ -585,7 +673,7 @@ func TestStep_AuthorityUnblocksOutputsAfterSustainedZeroOutput(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
 	blocked.Output1Enabled = 0
@@ -611,7 +699,7 @@ func TestStep_FullSoCStuckOutputRearmsControlledSlot(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	p.set(200, 0)
 	st.setFresh(statusWith(99, 0, 0, 0, 0, true))
@@ -654,7 +742,7 @@ func TestStep_FullSoCStuckOutputRearmCooldownPreventsFlapping(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	p.set(200, 0)
 	st.setFresh(statusWith(99, 0, 0, 0, 0, true))
@@ -684,7 +772,7 @@ func TestStep_FullSoCStuckOutputRearmRequiresZeroOutput(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	p.set(200, 0)
 	st.setFresh(statusWith(99, 0, 0, 0, 0, true))
@@ -712,7 +800,7 @@ func TestStep_FullSoCStuckOutputRearmRequiresFullSoC(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	p.set(200, 0)
 	st.setFresh(statusWith(80, 0, 0, 0, 0, true))
@@ -742,7 +830,7 @@ func TestStep_OutputEnableRemediationDoesNotStarveHigherSlotCommand(t *testing.T
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	// First publish establishes the stale low command that the live incident got
 	// stuck on.
@@ -799,7 +887,7 @@ func TestStep_NuclearRestartDisabledByDefault(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
 	cfg.NuclearRestartBlockedCycles = 3
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
 	blocked.Output1Enabled = 0
@@ -826,7 +914,7 @@ func TestStep_NuclearRestartPublishesAfterSustainedBlockedOutput(t *testing.T) {
 	cfg.NuclearRestartEnabled = true
 	cfg.NuclearRestartAckWiFiRecovery = true
 	cfg.NuclearRestartBlockedCycles = 4
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
 	blocked.Output1Enabled = 0
@@ -856,7 +944,7 @@ func TestStep_NuclearRestartRequiresOutputEnableAttempt(t *testing.T) {
 	cfg.NuclearRestartEnabled = true
 	cfg.NuclearRestartAckWiFiRecovery = true
 	cfg.NuclearRestartBlockedCycles = 1
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
 	blocked.Output1Enabled = 0
@@ -883,7 +971,7 @@ func TestStep_NuclearRestartDoesNotRunDuringExport(t *testing.T) {
 	cfg.NuclearRestartEnabled = true
 	cfg.NuclearRestartAckWiFiRecovery = true
 	cfg.NuclearRestartBlockedCycles = 3
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
 	blocked.Output1Enabled = 0
@@ -910,7 +998,7 @@ func TestStep_NuclearRestartDoesNotRunDuringTopChargeIdle(t *testing.T) {
 	cfg.NuclearRestartEnabled = true
 	cfg.NuclearRestartAckWiFiRecovery = true
 	cfg.NuclearRestartBlockedCycles = 2
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples+4; i++ {
 		p.set(0, 0)
@@ -938,7 +1026,7 @@ func TestStep_NuclearRestartDoesNotRunBelowSoCFloor(t *testing.T) {
 	cfg.NuclearRestartEnabled = true
 	cfg.NuclearRestartAckWiFiRecovery = true
 	cfg.NuclearRestartBlockedCycles = 2
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	p.set(200, 0)
 	for i := 0; i < 6; i++ {
@@ -963,7 +1051,7 @@ func TestStep_NuclearRestartRateLimited(t *testing.T) {
 	cfg.NuclearRestartAckWiFiRecovery = true
 	cfg.NuclearRestartBlockedCycles = 3
 	cfg.NuclearRestartMinInterval = time.Hour
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	blocked := withControlledSlot(statusWith(80, 0, 0, 0, 0, true), true, 200)
 	blocked.Output1Enabled = 0
@@ -987,7 +1075,7 @@ func TestStep_TopChargeIdleEntersOnlyAtFullWithSurplusEvidence(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
 		p.set(0, 0)
@@ -1010,7 +1098,7 @@ func TestStep_TopChargeIdleDoesNotEnterBelowFull(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples+2; i++ {
 		p.set(0, 0)
@@ -1029,7 +1117,7 @@ func TestStep_TopChargeIdleDoesNotEnterOnMeaningfulImport(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples+2; i++ {
 		p.set(100, 0)
@@ -1048,7 +1136,7 @@ func TestStep_TopChargeIdleDoesNotFlapOnSmallGridSwings(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
 		p.set(0, 0)
@@ -1079,7 +1167,7 @@ func TestStep_TopChargeIdleExitsOnSustainedImport(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
 	cfg.NearFullIdleGridImportExitSamples = 3
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
 		p.set(0, 0)
@@ -1112,7 +1200,7 @@ func TestStep_TopChargeIdleExitsWhenPassthroughIsLost(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
 		p.set(0, 0)
@@ -1149,7 +1237,7 @@ func TestStep_TopChargeIdleExitsOnRawImportWhenEMALags(t *testing.T) {
 	cfg := defaultCfg("topic", "00:00", "23:59")
 	cfg.SmoothingAlpha = 0.1
 	cfg.NearFullIdleGridImportExitSamples = 2
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
 		p.set(0, 0)
@@ -1185,7 +1273,7 @@ func TestStep_TopChargeIdleCooldownPreventsImmediateReentry(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
 	cfg.PrometheusStaleAfter = 10 * time.Minute
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
 		p.set(0, 0)
@@ -1226,7 +1314,7 @@ func TestStep_TopChargeIdleExitsWhenSoCDropsBelowFull(t *testing.T) {
 	st := &fakeStatus{}
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < cfg.NearFullIdleConsecutiveSamples; i++ {
 		p.set(0, 0)
@@ -1256,7 +1344,7 @@ func TestStep_TopChargeIdleKillSwitchDisablesEntry(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 	cfg := defaultCfg("topic", "00:00", "23:59")
 	cfg.NearFullIdleEnabled = false
-	c := controller.New(cfg, p, pub, st, clk, nil)
+	c := controller.New(cfg, gridProm(p, nil), pub, st, clk, nil)
 
 	for i := 0; i < 4; i++ {
 		p.set(0, 0)

@@ -23,6 +23,7 @@ type Metrics struct {
 
 	// Controller state (gauges)
 	GridPowerWatts          prometheus.Gauge
+	GridPowerSource         prometheus.Gauge
 	SmoothedGridPowerWatts  prometheus.Gauge
 	TargetSlotPowerWatts    prometheus.Gauge
 	CommandedSlotPowerWatts prometheus.Gauge
@@ -160,6 +161,7 @@ func New(deviceID, deviceType, brokerURL, version string) *Metrics {
 		Registry: reg,
 
 		GridPowerWatts:          newGauge("grid_power_watts", "Last Prometheus grid power sample (W). Positive = import, negative = export."),
+		GridPowerSource:         newGauge("grid_power_source", "Grid power signal source: 0=none, 1=primary, 2=plug fallback."),
 		SmoothedGridPowerWatts:  newGauge("smoothed_grid_power_watts", "EMA-smoothed grid power signal driving control decisions (W)."),
 		TargetSlotPowerWatts:    newGauge("target_slot_power_watts", "Computed target before ramp/hold limits are applied (W)."),
 		CommandedSlotPowerWatts: newGauge("commanded_slot_power_watts", "Last value actually published to the MQTT schedule slot (W)."),
@@ -243,6 +245,15 @@ func (m *Metrics) RecordLastMQTTPublish(now time.Time) {
 
 // State is the controller's operating state.
 type State float64
+
+// GridPowerSource identifies which Prometheus query last drove control.
+type GridPowerSource float64
+
+const (
+	GridPowerSourceNone     GridPowerSource = 0
+	GridPowerSourcePrimary  GridPowerSource = 1
+	GridPowerSourceFallback GridPowerSource = 2
+)
 
 const (
 	StateStarting    State = 0

@@ -8,9 +8,12 @@ import (
 	"github.com/lucavb/marstek-prometheus-controller/internal/promclient"
 )
 
-// PromReader returns the latest grid power sample from Prometheus.
-type PromReader interface {
-	Query(ctx context.Context) (promclient.Sample, error)
+// GridPromReader reads grid power from a primary Prometheus query and an
+// optional fallback query.
+type GridPromReader interface {
+	QueryPrimary(ctx context.Context) (promclient.Sample, error)
+	QueryFallback(ctx context.Context) (promclient.Sample, error)
+	FallbackEnabled() bool
 }
 
 // Publisher publishes an MQTT payload to a topic. Returns an error if

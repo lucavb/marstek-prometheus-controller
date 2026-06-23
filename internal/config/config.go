@@ -24,10 +24,11 @@ type Config struct {
 	HTTPListenAddr string
 
 	// Prometheus (input source for grid power)
-	PrometheusBaseURL    string
-	PrometheusQuery      string
-	PrometheusTimeout    time.Duration
-	PrometheusStaleAfter time.Duration
+	PrometheusBaseURL       string
+	PrometheusQuery         string
+	PrometheusFallbackQuery string
+	PrometheusTimeout       time.Duration
+	PrometheusStaleAfter    time.Duration
 
 	// MQTT
 	MQTTBrokerURL           string
@@ -116,10 +117,11 @@ func Load() (Config, error) {
 
 		HTTPListenAddr: getEnv("HTTP_LISTEN_ADDR", ":8080"),
 
-		PrometheusBaseURL:    getEnv("PROMETHEUS_BASE_URL", ""),
-		PrometheusQuery:      getEnv("PROMETHEUS_GRID_POWER_QUERY", "electricity_power_watts"),
-		PrometheusTimeout:    getEnvDuration("PROMETHEUS_TIMEOUT", 12*time.Second),
-		PrometheusStaleAfter: getEnvDuration("PROMETHEUS_STALE_AFTER", 60*time.Second),
+		PrometheusBaseURL:       getEnv("PROMETHEUS_BASE_URL", ""),
+		PrometheusQuery:         getEnv("PROMETHEUS_GRID_POWER_QUERY", "electricity_power_watts"),
+		PrometheusFallbackQuery: getEnv("PROMETHEUS_GRID_POWER_FALLBACK_QUERY", ""),
+		PrometheusTimeout:       getEnvDuration("PROMETHEUS_TIMEOUT", 12*time.Second),
+		PrometheusStaleAfter:    getEnvDuration("PROMETHEUS_STALE_AFTER", 60*time.Second),
 
 		MQTTBrokerURL:           getEnv("MQTT_BROKER_URL", ""),
 		MQTTClientID:            getEnv("MQTT_CLIENT_ID", fmt.Sprintf("marstek-controller-%d", pid)),

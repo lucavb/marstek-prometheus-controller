@@ -142,6 +142,7 @@ All settings are environment variables:
 | ----------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PROMETHEUS_BASE_URL`                     | *required*                 | Prometheus base URL, e.g. `http://prometheus:9090`                                                                                                                                                                                                                |
 | `PROMETHEUS_GRID_POWER_QUERY`             | `electricity_power_watts`  | PromQL expression returning grid power in watts                                                                                                                                                                                                                   |
+| `PROMETHEUS_GRID_POWER_FALLBACK_QUERY`    | ``                         | Optional PromQL returning partial apartment load in watts (e.g. smart-plug sum). Used when the primary query fails or is stale; disables zero-discharge fallback while plug data is fresh.                                                                       |
 | `PROMETHEUS_TIMEOUT`                      | `12s`                      | HTTP timeout for Prometheus queries. Keep this below `CONTROL_INTERVAL`; the default allows observed home-cluster Prometheus tail latency without turning slow queries into false fallback events.                                                                |
 | `PROMETHEUS_STALE_AFTER`                  | `60s`                      | Reject samples older than this                                                                                                                                                                                                                                    |
 | `MQTT_BROKER_URL`                         | *required*                 | MQTT broker URL, e.g. `tcp://10.1.1.5:1883`                                                                                                                                                                                                                       |
@@ -318,6 +319,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | Metric                           | Type  | Description                                                                           |
 | -------------------------------- | ----- | ------------------------------------------------------------------------------------- |
 | `grid_power_watts`               | Gauge | Last Prometheus sample (W)                                                            |
+| `grid_power_source`              | Gauge | Signal driving control: 0=none, 1=primary, 2=plug fallback                            |
 | `smoothed_grid_power_watts`      | Gauge | EMA-smoothed signal driving control (W)                                               |
 | `target_slot_power_watts`        | Gauge | Computed target before ramp/hold limits (W)                                           |
 | `commanded_slot_power_watts`     | Gauge | Last value published to the device (W)                                                |
@@ -341,7 +343,7 @@ All metrics are prefixed `marstek_controller_` and carry a constant label
 | Metric                                      | Type  | Description                                      |
 | ------------------------------------------- | ----- | ------------------------------------------------ |
 | `mqtt_connected`                            | Gauge | 1 connected, 0 disconnected                      |
-| `prometheus_up`                             | Gauge | 1 if last query was fresh, 0 if stale or errored |
+| `prometheus_up`                             | Gauge | 1 if the last grid-power query (primary or plug fallback) was fresh, 0 if both failed |
 | `last_prometheus_success_timestamp_seconds` | Gauge | Unix timestamp of last successful query          |
 | `last_mqtt_publish_timestamp_seconds`       | Gauge | Unix timestamp of last successful publish        |
 | `device_last_status_seconds`                | Gauge | Seconds since the last device status message     |
