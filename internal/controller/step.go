@@ -160,6 +160,7 @@ func (c *Controller) readGridSample(ctx context.Context) (sampleWatts struct {
 		}
 	}
 
+	c.gridPowerSource = metrics.GridPowerSourceNone
 	if c.m != nil {
 		c.m.PrometheusUp.Set(0)
 		c.m.GridPowerSource.Set(float64(metrics.GridPowerSourceNone))
@@ -178,6 +179,7 @@ func (c *Controller) acceptGridSample(sample promclient.Sample, now time.Time, s
 	Watts      float64
 	SampleTime time.Time
 }, time.Time, error) {
+	c.gridPowerSource = source
 	if c.m != nil {
 		c.m.GridPowerWatts.Set(sample.Watts)
 		c.m.GridPowerSource.Set(float64(source))

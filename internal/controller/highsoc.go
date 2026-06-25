@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/lucavb/marstek-prometheus-controller/internal/marstek"
+	"github.com/lucavb/marstek-prometheus-controller/internal/metrics"
 )
 
 type highSoCStage int
@@ -67,6 +68,9 @@ func (c *Controller) clampTargetWatts(target int) int {
 }
 
 func (c *Controller) computeRawTargetWithBias(devStatus marstek.Status, smoothed float64, importBiasWatts int) int {
+	if c.gridPowerSource == metrics.GridPowerSourceFallback {
+		return c.clampTargetWatts(int(math.Round(smoothed)) - importBiasWatts)
+	}
 	currentOutput := devStatus.Output1Watts + devStatus.Output2Watts
 	rawTarget := currentOutput + int(math.Round(smoothed)) - importBiasWatts
 	return c.clampTargetWatts(rawTarget)

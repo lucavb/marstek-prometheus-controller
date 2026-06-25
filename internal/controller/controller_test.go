@@ -322,6 +322,48 @@ func TestStep_PrometheusStaleUsesPlugFallback(t *testing.T) {
 	}
 }
 
+func TestStep_PlugFallbackOpenLoopNoRunaway(t *testing.T) {
+	primary := &fakeProm{}
+	fallback := &fakeProm{}
+	pub := &fakePublisher{}
+	st := &fakeStatus{}
+	clk := &fakeClock{now: time.Now()}
+
+	cfg := defaultCfg("topic", "00:00", "23:59")
+	cfg.ImportBiasWatts = 50
+	cfg.RampUpWattsPerCycle = 150
+	cfg.RampDownWattsPerCycle = 300
+
+	// Prime closed-loop control at high discharge before the grid metric drops.
+	primary.set(50, 0)
+	st.setFresh(statusWith(24, 0, 0, 350, 0, true))
+	c := controller.New(cfg, gridProm(primary, fallback), pub, st, clk, nil)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("prime Step() error = %v", err)
+	}
+
+	// Primary fails mid-operation; plug-sum is absolute load, not grid import.
+	primary.setErr(promclient.ErrEmptyResult)
+	fallback.set(270, 0)
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("fallback Step() error = %v", err)
+	}
+	got := pub.last()
+	// Open-loop: 270 − 50 = 220 W. Closed-loop would ramp toward 350+270−50 = 570 W.
+	if !strings.Contains(got, ",a1=1,") || !strings.Contains(got, ",v1=220,") {
+		t.Fatalf("expected 220 W open-loop plug fallback (270−50), got %q", got)
+	}
+
+	// A third cycle with unchanged inputs must not climb again.
+	if err := c.Step(context.Background()); err != nil {
+		t.Fatalf("steady Step() error = %v", err)
+	}
+	got = pub.last()
+	if strings.Contains(got, ",v1=370,") || strings.Contains(got, ",v1=500,") {
+		t.Fatalf("command climbed on steady plug fallback, got %q", got)
+	}
+}
+
 func TestStep_PrometheusAndPlugFallbackFailZeroDischarge(t *testing.T) {
 	primary := &fakeProm{}
 	fallback := &fakeProm{}

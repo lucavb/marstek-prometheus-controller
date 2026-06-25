@@ -101,6 +101,7 @@ type Controller struct {
 	m        *metrics.Metrics
 
 	// State
+	gridPowerSource         metrics.GridPowerSource
 	smoothed                float64
 	hasSmoothed             bool
 	lastCommandWatts        int
