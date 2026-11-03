@@ -6,74 +6,96 @@ import (
 	"time"
 
 	"github.com/lucavb/marstek-prometheus-controller/internal/marstek"
+	"github.com/lucavb/marstek-prometheus-controller/internal/metrics"
 )
 
-func (c *Controller) updateTopChargeIdle(now time.Time, devStatus marstek.Status, rawGridWatts, smoothed float64) bool {
-	requiredSamples := c.cfg.NearFullIdleConsecutiveSamples
+// topChargeIdleMachine owns the deliberate full-charge pass-through idle
+// regime: the controller leaves the controlled slot disabled so firmware can
+// pass full-charge PV through instead of forcing a pointless discharge. The
+// machine debounces entry and every exit condition, enforces a cooldown
+// after failed exits, and records its own metrics. Its state is mutated
+// only through its methods.
+type topChargeIdleMachine struct {
+	cfg Config
+	m   *metrics.Metrics
+
+	active                 bool
+	enterSamples           int
+	socExitSamples         int
+	importSamples          int
+	rawImportSamples       int
+	passThroughLostSamples int
+	blockedUntil           time.Time
+}
+
+// update advances the regime by one control cycle and reports whether the
+// regime is engaged (Step then idles instead of discharging).
+func (t *topChargeIdleMachine) update(now time.Time, devStatus marstek.Status, rawGridWatts, smoothed float64) bool {
+	requiredSamples := t.cfg.NearFullIdleConsecutiveSamples
 	if requiredSamples < 1 {
 		requiredSamples = 1
 	}
 
-	if !c.cfg.NearFullIdleEnabled {
-		if c.resetTopChargeIdleState("disabled") {
+	if !t.cfg.NearFullIdleEnabled {
+		if t.reset("disabled") {
 			slog.Info("top-charge idle deactivated", "reason", "disabled")
 		}
 		return false
 	}
-	if !c.cfg.EnforceSurplusFeedIn {
-		if c.resetTopChargeIdleState("surplus_feed_in_policy_disabled") {
+	if !t.cfg.EnforceSurplusFeedIn {
+		if t.reset("surplus_feed_in_policy_disabled") {
 			slog.Info("top-charge idle deactivated", "reason", "surplus_feed_in_policy_disabled")
 		}
 		return false
 	}
 	if !devStatus.SurplusFeedIn {
-		if c.resetTopChargeIdleState("surplus_feed_in_disabled") {
+		if t.reset("surplus_feed_in_disabled") {
 			slog.Info("top-charge idle deactivated", "reason", "surplus_feed_in_disabled")
 		}
 		return false
 	}
 
-	if c.topChargeIdleActive {
-		if devStatus.SOCPercent < c.cfg.NearFullIdleEnterPercent {
-			c.topChargeIdleSoCExitSamples++
+	if t.active {
+		if devStatus.SOCPercent < t.cfg.NearFullIdleEnterPercent {
+			t.socExitSamples++
 		} else {
-			c.topChargeIdleSoCExitSamples = 0
+			t.socExitSamples = 0
 		}
 
-		importExitEnabled := c.cfg.NearFullIdleGridImportExitSamples > 0
-		if importExitEnabled && smoothed > float64(c.cfg.NearFullIdleGridImportExitWatts) {
-			c.topChargeIdleImportSamples++
+		importExitEnabled := t.cfg.NearFullIdleGridImportExitSamples > 0
+		if importExitEnabled && smoothed > float64(t.cfg.NearFullIdleGridImportExitWatts) {
+			t.importSamples++
 		} else {
-			c.topChargeIdleImportSamples = 0
+			t.importSamples = 0
 		}
-		if importExitEnabled && rawGridWatts > float64(c.cfg.NearFullIdleGridImportExitWatts) {
-			c.topChargeIdleRawImportSamples++
+		if importExitEnabled && rawGridWatts > float64(t.cfg.NearFullIdleGridImportExitWatts) {
+			t.rawImportSamples++
 		} else {
-			c.topChargeIdleRawImportSamples = 0
+			t.rawImportSamples = 0
 		}
-		if c.topChargeIdleHealthy(devStatus) {
-			c.topChargeIdlePassThroughLostSamples = 0
+		if t.healthy(devStatus) {
+			t.passThroughLostSamples = 0
 		} else {
-			c.topChargeIdlePassThroughLostSamples++
+			t.passThroughLostSamples++
 		}
 
 		exitReason := ""
 		switch {
-		case c.topChargeIdleSoCExitSamples >= requiredSamples:
+		case t.socExitSamples >= requiredSamples:
 			exitReason = "soc_exit"
-		case c.topChargeIdlePassThroughLostSamples >= requiredSamples:
+		case t.passThroughLostSamples >= requiredSamples:
 			exitReason = "passthrough_lost"
-		case importExitEnabled && c.topChargeIdleRawImportSamples >= c.cfg.NearFullIdleGridImportExitSamples:
+		case importExitEnabled && t.rawImportSamples >= t.cfg.NearFullIdleGridImportExitSamples:
 			exitReason = "raw_grid_import"
-		case importExitEnabled && c.topChargeIdleImportSamples >= c.cfg.NearFullIdleGridImportExitSamples:
+		case importExitEnabled && t.importSamples >= t.cfg.NearFullIdleGridImportExitSamples:
 			exitReason = "grid_import"
 		}
 		if exitReason != "" {
-			c.resetTopChargeIdleState(exitReason)
+			t.reset(exitReason)
 			blockedUntil := time.Time{}
 			switch exitReason {
 			case "passthrough_lost", "raw_grid_import", "grid_import":
-				blockedUntil = c.blockTopChargeIdleUntil(now)
+				blockedUntil = t.blockUntil(now)
 			}
 			slog.Info("top-charge idle deactivated",
 				"soc_pct", devStatus.SOCPercent,
@@ -86,30 +108,30 @@ func (c *Controller) updateTopChargeIdle(now time.Time, devStatus marstek.Status
 		return true
 	}
 
-	if !c.topChargeIdleBlockedUntil.IsZero() && now.Before(c.topChargeIdleBlockedUntil) {
+	if !t.blockedUntil.IsZero() && now.Before(t.blockedUntil) {
 		return false
 	}
 
-	if c.topChargeEntryEligible(devStatus, rawGridWatts, smoothed) {
-		c.topChargeIdleEnterSamples++
+	if t.entryEligible(devStatus, rawGridWatts, smoothed) {
+		t.enterSamples++
 	} else {
-		c.topChargeIdleEnterSamples = 0
+		t.enterSamples = 0
 	}
-	if c.topChargeIdleEnterSamples < requiredSamples {
+	if t.enterSamples < requiredSamples {
 		return false
 	}
 
-	c.topChargeIdleActive = true
-	c.topChargeIdleEnterSamples = 0
-	c.topChargeIdleSoCExitSamples = 0
-	c.topChargeIdleImportSamples = 0
-	if c.m != nil {
-		c.m.TopChargeIdleActive.Set(1)
-		c.m.TopChargeIdleEntered.Inc()
+	t.active = true
+	t.enterSamples = 0
+	t.socExitSamples = 0
+	t.importSamples = 0
+	if t.m != nil {
+		t.m.TopChargeIdleActive.Set(1)
+		t.m.TopChargeIdleEntered.Inc()
 	}
 	slog.Info("top-charge idle activated",
 		"soc_pct", devStatus.SOCPercent,
-		"enter_pct", c.cfg.NearFullIdleEnterPercent,
+		"enter_pct", t.cfg.NearFullIdleEnterPercent,
 		"raw_grid_watts", math.Round(rawGridWatts),
 		"smoothed_grid_watts", math.Round(smoothed),
 		"solar_input_watts", devStatus.Solar1Watts+devStatus.Solar2Watts,
@@ -118,29 +140,66 @@ func (c *Controller) updateTopChargeIdle(now time.Time, devStatus marstek.Status
 	return true
 }
 
-func (c *Controller) topChargeEntryEligible(devStatus marstek.Status, rawGridWatts, smoothed float64) bool {
-	if devStatus.SOCPercent < c.cfg.NearFullIdleEnterPercent {
+// reset disengages the regime and clears every debounce counter. When the
+// regime was active it records the exit metrics with the given reason and
+// returns true so the caller can log the transition.
+func (t *topChargeIdleMachine) reset(reason string) bool {
+	wasActive := t.active
+	t.active = false
+	t.enterSamples = 0
+	t.socExitSamples = 0
+	t.importSamples = 0
+	t.rawImportSamples = 0
+	t.passThroughLostSamples = 0
+	if t.m != nil {
+		t.m.TopChargeIdleActive.Set(0)
+		if wasActive {
+			t.m.TopChargeIdleExited.Inc()
+			if reason != "" {
+				t.m.TopChargeIdleExitReasonTotal.WithLabelValues(reason).Inc()
+			}
+		}
+	}
+	return wasActive
+}
+
+// blockUntil starts the cooldown that delays re-entry after a failed exit and
+// returns the new deadline.
+func (t *topChargeIdleMachine) blockUntil(now time.Time) time.Time {
+	t.blockedUntil = now.Add(t.failureCooldown())
+	return t.blockedUntil
+}
+
+// failureCooldown is how long re-entry stays blocked after the regime exits
+// on evidence the pass-through is not working: at least the authority
+// publish cooldown, and never below one minute.
+func (t *topChargeIdleMachine) failureCooldown() time.Duration {
+	cooldown := authorityPublishCooldown(t.cfg)
+	if cooldown < time.Minute {
+		cooldown = time.Minute
+	}
+	return cooldown
+}
+
+// entryEligible reports whether this cycle shows evidence that the battery
+// is truly full and PV can be passed through by firmware.
+func (t *topChargeIdleMachine) entryEligible(devStatus marstek.Status, rawGridWatts, smoothed float64) bool {
+	if devStatus.SOCPercent < t.cfg.NearFullIdleEnterPercent {
 		return false
 	}
 	// Meaningful import means solar no longer covers load, so do not enter a
 	// pass-through idle that would strand the house on grid power.
-	if smoothed > float64(c.cfg.ImportBiasWatts) || rawGridWatts > float64(c.cfg.ImportBiasWatts) {
+	if smoothed > float64(t.cfg.ImportBiasWatts) || rawGridWatts > float64(t.cfg.ImportBiasWatts) {
 		return false
 	}
 	solarInputWatts := devStatus.Solar1Watts + devStatus.Solar2Watts
 	outputWatts := devStatus.Output1Watts + devStatus.Output2Watts
-	return solarInputWatts > 0 || outputWatts > c.topChargeIdleNearZeroLimit() || devStatus.PassThroughActive()
+	return solarInputWatts > 0 || outputWatts > nearZeroOutputWatts(t.cfg.MinOutputWatts) || devStatus.PassThroughActive()
 }
 
-func (c *Controller) topChargeIdleHealthy(devStatus marstek.Status) bool {
+// healthy reports whether pass-through is still flowing while the regime is
+// engaged.
+func (t *topChargeIdleMachine) healthy(devStatus marstek.Status) bool {
 	outputWatts := devStatus.Output1Watts + devStatus.Output2Watts
-	return devStatus.PassThroughActive() || outputWatts > c.topChargeIdleNearZeroLimit()
-}
-
-func (c *Controller) topChargeIdleNearZeroLimit() int {
-	nearZeroLimit := c.cfg.MinOutputWatts / 2
-	if nearZeroLimit < 20 {
-		nearZeroLimit = 20
-	}
-	return nearZeroLimit
+	return devStatus.PassThroughActive() || outputWatts > nearZeroOutputWatts(t.cfg.MinOutputWatts)
 }
