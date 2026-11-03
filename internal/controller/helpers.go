@@ -105,6 +105,17 @@ func isTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
+// nearZeroOutputWatts is the threshold at or below which measured output
+// counts as zero: the device clamps non-zero commands to at least
+// MinOutputWatts, so anything meaningfully below that floor is noise.
+func nearZeroOutputWatts(minOutputWatts int) int {
+	nearZero := minOutputWatts / 2
+	if nearZero < 20 {
+		nearZero = 20
+	}
+	return nearZero
+}
+
 func abs(v int) int {
 	if v < 0 {
 		return -v
