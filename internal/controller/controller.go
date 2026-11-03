@@ -243,7 +243,7 @@ func (c *Controller) resetTopChargeIdleState(reason string) bool {
 }
 
 func (c *Controller) topChargeIdleFailureCooldown() time.Duration {
-	cooldown := c.authorityPublishCooldown()
+	cooldown := authorityPublishCooldown(c.cfg)
 	if cooldown < time.Minute {
 		cooldown = time.Minute
 	}

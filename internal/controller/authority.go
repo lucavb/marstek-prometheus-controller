@@ -7,26 +7,6 @@ import (
 	"github.com/lucavb/marstek-prometheus-controller/internal/marstek"
 )
 
-func (c *Controller) authorityPublishCooldown() time.Duration {
-	cooldown := c.cfg.ControlInterval
-	if c.cfg.StatusPollTimeout > cooldown {
-		cooldown = c.cfg.StatusPollTimeout
-	}
-	if cooldown <= 0 {
-		cooldown = 15 * time.Second
-	}
-	return 2 * cooldown
-}
-
-func (c *Controller) clearPendingAuthorityPayload(payload string) {
-	if payload == "" || c.authorityPendingPayload != payload {
-		return
-	}
-	c.authorityPendingPayload = ""
-	c.authorityPendingSince = time.Time{}
-	c.authorityPendingSeenAt = time.Time{}
-}
-
 func (c *Controller) publishAuthorityPayload(now, observedAt time.Time, payload, kind string, attrs ...any) (bool, bool, error) {
 	return c.publishAuthorityPayloadWithOutcome(now, observedAt, payload, kind, "published", attrs...)
 }
@@ -35,10 +15,7 @@ func (c *Controller) publishAuthorityPayloadWithOutcome(now, observedAt time.Tim
 	if payload == "" {
 		return false, false, nil
 	}
-	if payload == c.authorityPendingPayload &&
-		!c.authorityPendingSince.IsZero() &&
-		(observedAt.IsZero() || observedAt.Equal(c.authorityPendingSeenAt)) &&
-		now.Sub(c.authorityPendingSince) < c.authorityPublishCooldown() {
+	if c.pendingEchoAwaited(payload, now, observedAt) {
 		slog.Debug("authority remediation awaiting status echo",
 			"kind", kind,
 			"payload", payload,
@@ -53,13 +30,9 @@ func (c *Controller) publishAuthorityPayloadWithOutcome(now, observedAt time.Tim
 		}
 		return false, false, err
 	}
-	c.authorityPendingPayload = payload
-	c.authorityPendingSince = now
-	c.authorityPendingSeenAt = observedAt
+	c.recordSuccessfulPublish(payload, now, observedAt)
 	if c.m != nil {
-		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
 		c.m.AuthorityRemediationTotal.WithLabelValues(kind, outcome).Inc()
-		c.m.RecordLastMQTTPublish(now)
 	}
 	logAttrs := append([]any{"kind", kind, "payload", payload}, attrs...)
 	slog.Warn("controller authority remediation published", logAttrs...)
@@ -133,12 +106,8 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		return false, nil
 	}
 
-	idx := c.cfg.ScheduleSlot - 1
-	if idx < 0 || idx > 4 {
-		idx = 0
-	}
-	controlledSlot := devStatus.Slots[idx]
-	desiredSlot, _ := c.desiredControlledSlot(devStatus, desiredWatts)
+	controlledSlot := devStatus.Slots[c.controlledSlotIndex()]
+	desiredSlot := c.desiredControlledSlot(desiredWatts)
 	slotArmed := controlledSlot.Enabled && controlledSlot.Watts > 0
 
 	currentOutputWatts := devStatus.Output1Watts + devStatus.Output2Watts
@@ -210,15 +179,11 @@ func (c *Controller) fullSoCStuckOutputCandidate(devStatus marstek.Status, desir
 	if desiredWatts <= 0 || devStatus.SOCPercent < 100 {
 		return false
 	}
-	nearZeroLimit := c.cfg.MinOutputWatts / 2
-	if nearZeroLimit < 20 {
-		nearZeroLimit = 20
-	}
-	return currentOutputWatts <= nearZeroLimit
+	return currentOutputWatts <= nearZeroOutputWatts(c.cfg.MinOutputWatts)
 }
 
 func (c *Controller) stuckOutputRearmCooldown() time.Duration {
-	cooldown := 2 * c.authorityPublishCooldown()
+	cooldown := 2 * authorityPublishCooldown(c.cfg)
 	if cooldown < time.Minute {
 		cooldown = time.Minute
 	}
@@ -240,19 +205,7 @@ func (c *Controller) maybeStartStuckOutputRearm(now time.Time, devStatus marstek
 		return false, nil
 	}
 
-	_, slots := c.desiredControlledSlot(devStatus, desiredWatts)
-	idx := c.cfg.ScheduleSlot - 1
-	if idx < 0 || idx > 4 {
-		idx = 0
-	}
-	current := slots[idx]
-	slots[idx] = marstek.Slot{
-		Enabled: false,
-		Start:   c.cfg.ScheduleStart,
-		End:     c.cfg.ScheduleEnd,
-		Watts:   0,
-	}
-	payload := marstek.BuildTimedDischargePayload(slots, false)
+	current, payload := c.buildSlotPayload(devStatus, c.disabledControlledSlot(), false)
 	handled, published, err := c.publishAuthorityPayloadWithOutcome(now, time.Time{}, payload, "stuck_output_rearm", "disable_sent",
 		"slot", c.cfg.ScheduleSlot,
 		"desired_watts", desiredWatts,
@@ -269,11 +222,7 @@ func (c *Controller) maybeStartStuckOutputRearm(now time.Time, devStatus marstek
 		c.stuckOutputRearmStartedAt = now
 		c.lastStuckOutputRearmAt = now
 		c.lastOutputEnableAttemptAt = now
-		c.lastCommandWatts = 0
-		c.lastCommandTime = now
-		if c.m != nil {
-			c.m.CommandedSlotPowerWatts.Set(0)
-		}
+		c.recordCommandedWatts(0, now)
 		slog.Warn("full-soc stuck output detected; controlled slot disabled for re-arm",
 			"slot", c.cfg.ScheduleSlot,
 			"desired_watts", desiredWatts,
@@ -294,14 +243,8 @@ func (c *Controller) maybeCompleteStuckOutputRearm(now time.Time, desiredWatts i
 		return true, nil
 	}
 
-	desired, slots := c.desiredControlledSlot(devStatus, desiredWatts)
-	idx := c.cfg.ScheduleSlot - 1
-	if idx < 0 || idx > 4 {
-		idx = 0
-	}
-	current := slots[idx]
-	slots[idx] = desired
-	payload := marstek.BuildTimedDischargePayload(slots, false)
+	desired := c.desiredControlledSlot(desiredWatts)
+	current, payload := c.buildSlotPayload(devStatus, desired, false)
 	handled, published, err := c.publishAuthorityPayloadWithOutcome(now, time.Time{}, payload, "stuck_output_rearm", "reenable_sent",
 		"slot", c.cfg.ScheduleSlot,
 		"desired_watts", desiredWatts,
@@ -314,11 +257,7 @@ func (c *Controller) maybeCompleteStuckOutputRearm(now time.Time, desiredWatts i
 	if published {
 		c.clearStuckOutputRearm()
 		c.lastOutputEnableAttemptAt = now
-		c.lastCommandWatts = desiredWatts
-		c.lastCommandTime = now
-		if c.m != nil {
-			c.m.CommandedSlotPowerWatts.Set(float64(desiredWatts))
-		}
+		c.recordCommandedWatts(desiredWatts, now)
 		slog.Warn("full-soc stuck output re-arm completed; controlled slot re-enabled",
 			"slot", c.cfg.ScheduleSlot,
 			"desired_watts", desiredWatts,
@@ -411,12 +350,8 @@ func (c *Controller) maybeNuclearRestartRecovery(now time.Time, devStatus marste
 	c.outputBlockedCycles = 0
 	c.lastOutputEnableAttemptAt = time.Time{}
 	c.loggedNuclearRestartBlocked = false
-	c.authorityPendingPayload = marstek.RestartPayload
-	c.authorityPendingSince = now
-	c.authorityPendingSeenAt = time.Time{}
+	c.recordSuccessfulPublish(marstek.RestartPayload, now, time.Time{})
 	if c.m != nil {
-		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
-		c.m.RecordLastMQTTPublish(now)
 		c.m.NuclearRestartTotal.WithLabelValues("restart_command_published").Inc()
 		c.m.LastNuclearRestartTimestampSecs.Set(float64(now.Unix()))
 	}
@@ -438,29 +373,9 @@ func (c *Controller) recordNuclearRestartOutcome(outcome string) {
 	c.m.NuclearRestartTotal.WithLabelValues(outcome).Inc()
 }
 
-func (c *Controller) desiredControlledSlot(devStatus marstek.Status, desiredWatts int) (marstek.Slot, [5]marstek.Slot) {
-	slots := marstek.SlotsAsWriteSlots(devStatus)
-	if desiredWatts < 0 {
-		desiredWatts = 0
-	}
-	desired := marstek.Slot{
-		Enabled: desiredWatts > 0,
-		Start:   c.cfg.ScheduleStart,
-		End:     c.cfg.ScheduleEnd,
-		Watts:   desiredWatts,
-	}
-	return desired, slots
-}
-
 func (c *Controller) ensureControlledSlot(now, observedAt time.Time, devStatus marstek.Status, desiredWatts int, reason string) (bool, bool, error) {
-	desired, slots := c.desiredControlledSlot(devStatus, desiredWatts)
-	idx := c.cfg.ScheduleSlot - 1
-	if idx < 0 || idx > 4 {
-		idx = 0
-	}
-	current := slots[idx]
-	slots[idx] = desired
-	payload := marstek.BuildTimedDischargePayload(slots, false)
+	desired := c.desiredControlledSlot(desiredWatts)
+	current, payload := c.buildSlotPayload(devStatus, desired, false)
 	if controlledSlotMatches(current, desired) {
 		c.clearPendingAuthorityPayload(payload)
 		return false, false, nil
@@ -474,14 +389,4 @@ func (c *Controller) ensureControlledSlot(now, observedAt time.Time, devStatus m
 		"current_start", current.Start,
 		"current_end", current.End,
 		"current_watts", current.Watts)
-}
-
-func controlledSlotMatches(current, desired marstek.Slot) bool {
-	if current.Enabled != desired.Enabled || current.Start != desired.Start || current.End != desired.End {
-		return false
-	}
-	if !desired.Enabled {
-		return true
-	}
-	return current.Watts == desired.Watts
 }

@@ -331,17 +331,7 @@ func (c *Controller) publishNormalControl(ctx context.Context, now, statusReceiv
 		return c.suppressOrReassert(now, statusReceivedAt, devStatus, c.lastCommandWatts, "hold_time", "hold_time", smoothed)
 	}
 
-	slots := marstek.SlotsAsWriteSlots(devStatus)
-	idx := c.cfg.ScheduleSlot - 1
-	if idx < 0 || idx > 4 {
-		idx = 0
-	}
-	slots[idx].Enabled = ramped > 0
-	slots[idx].Start = c.cfg.ScheduleStart
-	slots[idx].End = c.cfg.ScheduleEnd
-	slots[idx].Watts = ramped
-
-	payload := marstek.BuildTimedDischargePayload(slots, c.cfg.PersistToFlash)
+	_, payload := c.buildSlotPayload(devStatus, c.desiredControlledSlot(ramped), c.cfg.PersistToFlash)
 	slog.Debug("publishing schedule update",
 		"slot", c.cfg.ScheduleSlot, "watts", ramped,
 		"prev_watts", c.lastCommandWatts, "payload", payload)
@@ -355,15 +345,9 @@ func (c *Controller) publishNormalControl(ctx context.Context, now, statusReceiv
 		return err
 	}
 
-	c.lastCommandWatts = ramped
-	c.lastCommandTime = now
-	c.authorityPendingPayload = payload
-	c.authorityPendingSince = now
-	c.authorityPendingSeenAt = statusReceivedAt
+	c.recordSuccessfulPublish(payload, now, statusReceivedAt)
+	c.recordCommandedWatts(ramped, now)
 	if c.m != nil {
-		c.m.CommandedSlotPowerWatts.Set(float64(ramped))
-		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
-		c.m.RecordLastMQTTPublish(now)
 		c.updateState(smoothed)
 	}
 	c.ready = true
@@ -382,10 +366,7 @@ func (c *Controller) suppressOrReassert(now, statusReceivedAt time.Time, devStat
 		return err
 	}
 	if published {
-		c.lastCommandTime = now
-		if c.m != nil {
-			c.m.CommandedSlotPowerWatts.Set(float64(watts))
-		}
+		c.recordReassertedCommand(watts, now)
 	}
 	if handled {
 		c.ready = true

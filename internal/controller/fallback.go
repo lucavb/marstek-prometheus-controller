@@ -30,26 +30,13 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	if c.hasLastStatus {
 		base = c.lastStatus
 	}
-	slots := marstek.SlotsAsWriteSlots(base)
-	idx := c.cfg.ScheduleSlot - 1
-	if idx < 0 || idx > 4 {
-		idx = 0
-	}
-	current := slots[idx]
-	// Disable the slot rather than sending Watts=0: the device silently clamps
-	// v=0 to 80W on an enabled slot, so Enabled=false is the only real stop.
-	slots[idx] = marstek.Slot{
-		Enabled: false,
-		Start:   c.cfg.ScheduleStart,
-		End:     c.cfg.ScheduleEnd,
-		Watts:   0,
-	}
-	if current == slots[idx] {
-		c.lastCommandWatts = 0
+	desired := c.disabledControlledSlot()
+	current, payload := c.buildSlotPayload(base, desired, false)
+	if current == desired {
+		c.noteIdleWithoutPublish(false)
 		return nil
 	}
 
-	payload := marstek.BuildTimedDischargePayload(slots, false)
 	if err := c.pub.Publish(c.cfg.ControlTopic, payload); err != nil {
 		slog.Warn("fallback publish failed", "err", err, "reason", reason)
 		if c.m != nil {
@@ -59,16 +46,9 @@ func (c *Controller) fallback(ctx context.Context, reason string) error {
 	}
 
 	slog.Warn("fallback: commanded zero discharge", "reason", reason)
-	c.lastCommandWatts = 0
-	c.lastCommandTime = c.clock.Now()
-	c.authorityPendingPayload = payload
-	c.authorityPendingSince = c.lastCommandTime
-	c.authorityPendingSeenAt = time.Time{}
-	if c.m != nil {
-		c.m.CommandedSlotPowerWatts.Set(0)
-		c.m.MQTTPublishesTotal.WithLabelValues("write").Inc()
-		c.m.RecordLastMQTTPublish(c.lastCommandTime)
-	}
+	now := c.clock.Now()
+	c.recordSuccessfulPublish(payload, now, time.Time{})
+	c.recordCommandedWatts(0, now)
 	return nil
 }
 
@@ -89,18 +69,13 @@ func (c *Controller) commandIdle(ctx context.Context, now, observedAt time.Time,
 		return err
 	}
 	if handled {
-		c.lastCommandWatts = 0
 		if published {
-			c.lastCommandTime = now
-			if c.m != nil {
-				c.m.CommandedSlotPowerWatts.Set(0)
-			}
+			c.recordCommandedWatts(0, now)
+		} else {
+			c.noteIdleWithoutPublish(false)
 		}
 		return nil
 	}
-	c.lastCommandWatts = 0
-	if c.m != nil {
-		c.m.CommandedSlotPowerWatts.Set(0)
-	}
+	c.noteIdleWithoutPublish(true)
 	return nil
 }
