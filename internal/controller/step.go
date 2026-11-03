@@ -73,23 +73,19 @@ func (c *Controller) Step(ctx context.Context) error {
 			"resume_at_pct", resumeAt,
 			"dod_pct", devStatus.DoDPercent)
 		c.ready = true
-		c.resetTopChargeIdleState("soc_floor")
-		c.outputBlockedCycles = 0
-		c.lastOutputEnableAttemptAt = time.Time{}
-		c.loggedNuclearRestartBlocked = false
+		c.topChargeIdle.reset("soc_floor")
+		c.escalation.reset()
 		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "soc_floor")
 	}
 
 	rawTarget, highSoCStage := c.computeTarget(devStatus, smoothed)
-	if highSoCStage.active() && c.resetTopChargeIdleState("high_soc_policy") {
+	if highSoCStage.active() && c.topChargeIdle.reset("high_soc_policy") {
 		slog.Info("top-charge idle deactivated", "reason", "high_soc_policy", "soc_pct", devStatus.SOCPercent)
 	}
 
-	if c.updateTopChargeIdle(now, devStatus, sample.Watts, smoothed) {
+	if c.topChargeIdle.update(now, devStatus, sample.Watts, smoothed) {
 		c.ready = true
-		c.outputBlockedCycles = 0
-		c.lastOutputEnableAttemptAt = time.Time{}
-		c.loggedNuclearRestartBlocked = false
+		c.escalation.reset()
 		return c.commandIdle(ctx, now, statusReceivedAt, devStatus, "top_charge_idle")
 	}
 

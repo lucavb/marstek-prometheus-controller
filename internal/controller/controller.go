@@ -123,21 +123,19 @@ type Controller struct {
 	// It stays true until SoC climbs back above (softFloor + hysteresis).
 	socFloorActive bool
 
-	// topChargeIdleActive is true while the controller is intentionally leaving
-	// the controlled slot disabled so full-charge PV can pass through firmware.
-	topChargeIdleActive                 bool
-	topChargeIdleEnterSamples           int
-	topChargeIdleSoCExitSamples         int
-	topChargeIdleImportSamples          int
-	topChargeIdleRawImportSamples       int
-	topChargeIdlePassThroughLostSamples int
-	topChargeIdleBlockedUntil           time.Time
+	// topChargeIdle owns the deliberate full-charge pass-through idle regime
+	// (topcharge.go): the controller leaves the controlled slot disabled so
+	// full-charge PV can pass through firmware instead of forcing a
+	// pointless discharge.
+	topChargeIdle topChargeIdleMachine
 
-	// outputBlockedCycles counts consecutive cycles where the controller wants
-	// discharge, the slot is already armed, but the device still reports no
-	// solar and no output. This is treated as a runtime precondition failure
-	// (outputs blocked), not as a control-law problem.
-	outputBlockedCycles int
+	// escalation owns the blocked-output ladder (escalation.go): when the
+	// controller wants discharge and the slot is armed but the device
+	// reports no battery contribution, it counts consecutive blocked cycles
+	// and drives output-enable remediation up to the opt-in nuclear
+	// restart. Treated as a runtime precondition failure, not a control-law
+	// problem.
+	escalation escalationMachine
 
 	// highSoCStage keeps the staged high-SoC policy stable across descending SoC
 	// transitions. In particular, the 97% max-output stage stays active until SoC
@@ -154,9 +152,6 @@ type Controller struct {
 
 	lastSurplusFeedInRecoveryAt time.Time
 	loggedSurplusFeedInBlocked  bool
-	lastOutputEnableAttemptAt   time.Time
-	lastNuclearRestartAt        time.Time
-	loggedNuclearRestartBlocked bool
 }
 
 // New creates a Controller. All fields of cfg must be set; clock may be nil
@@ -166,12 +161,13 @@ func New(cfg Config, gridProm GridPromReader, pub Publisher, status StatusSource
 		clock = RealClock{}
 	}
 	c := &Controller{
-		cfg:      cfg,
-		gridProm: gridProm,
-		pub:      pub,
-		status:   status,
-		clock:    clock,
-		m:        m,
+		cfg:           cfg,
+		gridProm:      gridProm,
+		pub:           pub,
+		status:        status,
+		clock:         clock,
+		m:             m,
+		topChargeIdle: topChargeIdleMachine{cfg: cfg, m: m},
 	}
 	if m != nil {
 		m.SlotIndex.Set(float64(cfg.ScheduleSlot))
@@ -218,39 +214,4 @@ func (c *Controller) Run(ctx context.Context) error {
 // the deadband and suppress the write.
 func (c *Controller) Ready() bool {
 	return c.ready
-}
-
-// resetTopChargeIdleState clears top-charge idle state. When the mode was
-// active, metrics record the exit reason.
-func (c *Controller) resetTopChargeIdleState(reason string) bool {
-	wasActive := c.topChargeIdleActive
-	c.topChargeIdleActive = false
-	c.topChargeIdleEnterSamples = 0
-	c.topChargeIdleSoCExitSamples = 0
-	c.topChargeIdleImportSamples = 0
-	c.topChargeIdleRawImportSamples = 0
-	c.topChargeIdlePassThroughLostSamples = 0
-	if c.m != nil {
-		c.m.TopChargeIdleActive.Set(0)
-		if wasActive {
-			c.m.TopChargeIdleExited.Inc()
-			if reason != "" {
-				c.m.TopChargeIdleExitReasonTotal.WithLabelValues(reason).Inc()
-			}
-		}
-	}
-	return wasActive
-}
-
-func (c *Controller) topChargeIdleFailureCooldown() time.Duration {
-	cooldown := authorityPublishCooldown(c.cfg)
-	if cooldown < time.Minute {
-		cooldown = time.Minute
-	}
-	return cooldown
-}
-
-func (c *Controller) blockTopChargeIdleUntil(now time.Time) time.Time {
-	c.topChargeIdleBlockedUntil = now.Add(c.topChargeIdleFailureCooldown())
-	return c.topChargeIdleBlockedUntil
 }

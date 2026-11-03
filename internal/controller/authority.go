@@ -99,9 +99,7 @@ func (c *Controller) ensureSurplusFeedIn(now time.Time, devStatus marstek.Status
 func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.Status, desiredWatts int, smoothed float64) (bool, error) {
 	outputEnablePayload := marstek.BuildOutputEnablePayload(true, true)
 	if desiredWatts <= 0 {
-		c.outputBlockedCycles = 0
-		c.lastOutputEnableAttemptAt = time.Time{}
-		c.loggedNuclearRestartBlocked = false
+		c.escalation.reset()
 		c.clearStuckOutputRearm()
 		return false, nil
 	}
@@ -124,9 +122,7 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		}
 	}
 	if batteryContributionWatts > 0 || !slotArmed || c.lastCommandWatts <= 0 {
-		c.outputBlockedCycles = 0
-		c.lastOutputEnableAttemptAt = time.Time{}
-		c.loggedNuclearRestartBlocked = false
+		c.escalation.reset()
 		c.clearStuckOutputRearm()
 		if batteryContributionWatts > 0 || (devStatus.Output1Enabled == 1 && devStatus.Output2Enabled == 1) {
 			c.clearPendingAuthorityPayload(outputEnablePayload)
@@ -137,13 +133,11 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		controlledSlot.Start != desiredSlot.Start ||
 		controlledSlot.End != desiredSlot.End ||
 		(desiredSlot.Enabled && controlledSlot.Watts != desiredSlot.Watts) {
-		c.outputBlockedCycles = 0
-		c.lastOutputEnableAttemptAt = time.Time{}
-		c.loggedNuclearRestartBlocked = false
+		c.escalation.reset()
 		return false, nil
 	}
 
-	c.outputBlockedCycles++
+	c.escalation.noteBlockedCycle()
 	if handled, err := c.maybeStartStuckOutputRearm(now, devStatus, desiredWatts, smoothed, currentOutputWatts); handled || err != nil {
 		return handled, err
 	}
@@ -152,7 +146,7 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 	} else if handled {
 		return true, nil
 	}
-	if c.outputBlockedCycles < 2 {
+	if c.escalation.blockedCycles < 2 {
 		return false, nil
 	}
 
@@ -170,7 +164,7 @@ func (c *Controller) maybeEnsureOutputEnabled(now time.Time, devStatus marstek.S
 		"o1", devStatus.Output1Enabled,
 		"o2", devStatus.Output2Enabled)
 	if handled {
-		c.lastOutputEnableAttemptAt = now
+		c.escalation.recordEnableAttempt(now)
 	}
 	return handled, err
 }
@@ -191,7 +185,7 @@ func (c *Controller) stuckOutputRearmCooldown() time.Duration {
 }
 
 func (c *Controller) maybeStartStuckOutputRearm(now time.Time, devStatus marstek.Status, desiredWatts int, smoothed float64, currentOutputWatts int) (bool, error) {
-	if c.outputBlockedCycles < 2 {
+	if c.escalation.blockedCycles < 2 {
 		return false, nil
 	}
 	if !c.fullSoCStuckOutputCandidate(devStatus, desiredWatts, currentOutputWatts) {
@@ -215,13 +209,13 @@ func (c *Controller) maybeStartStuckOutputRearm(now time.Time, devStatus marstek
 		"smoothed_grid_watts", smoothed,
 		"output_watts", currentOutputWatts,
 		"outputs_enabled", devStatus.Output1Enabled+devStatus.Output2Enabled,
-		"blocked_cycles", c.outputBlockedCycles)
+		"blocked_cycles", c.escalation.blockedCycles)
 	if published {
 		c.stuckOutputRearmPending = true
 		c.stuckOutputRearmWatts = desiredWatts
 		c.stuckOutputRearmStartedAt = now
 		c.lastStuckOutputRearmAt = now
-		c.lastOutputEnableAttemptAt = now
+		c.escalation.recordEnableAttempt(now)
 		c.recordCommandedWatts(0, now)
 		slog.Warn("full-soc stuck output detected; controlled slot disabled for re-arm",
 			"slot", c.cfg.ScheduleSlot,
@@ -230,7 +224,7 @@ func (c *Controller) maybeStartStuckOutputRearm(now time.Time, devStatus marstek
 			"smoothed_grid_watts", smoothed,
 			"output_watts", currentOutputWatts,
 			"outputs_enabled", devStatus.Output1Enabled+devStatus.Output2Enabled,
-			"blocked_cycles", c.outputBlockedCycles)
+			"blocked_cycles", c.escalation.blockedCycles)
 	}
 	return handled, err
 }
@@ -256,7 +250,7 @@ func (c *Controller) maybeCompleteStuckOutputRearm(now time.Time, desiredWatts i
 		"outputs_enabled", devStatus.Output1Enabled+devStatus.Output2Enabled)
 	if published {
 		c.clearStuckOutputRearm()
-		c.lastOutputEnableAttemptAt = now
+		c.escalation.recordEnableAttempt(now)
 		c.recordCommandedWatts(desiredWatts, now)
 		slog.Warn("full-soc stuck output re-arm completed; controlled slot re-enabled",
 			"slot", c.cfg.ScheduleSlot,
@@ -287,10 +281,10 @@ func (c *Controller) maybeNuclearRestartRecovery(now time.Time, devStatus marste
 	if requiredCycles <= 0 {
 		requiredCycles = 6
 	}
-	if c.outputBlockedCycles < requiredCycles {
+	if c.escalation.blockedCycles < requiredCycles {
 		return false, nil
 	}
-	if c.lastOutputEnableAttemptAt.IsZero() {
+	if !c.escalation.enableAttempted() {
 		c.recordNuclearRestartOutcome("blocked_evidence_insufficient")
 		return false, nil
 	}
@@ -300,10 +294,9 @@ func (c *Controller) maybeNuclearRestartRecovery(now time.Time, devStatus marste
 	}
 	if !c.cfg.NuclearRestartEnabled {
 		c.recordNuclearRestartOutcome("disabled")
-		if !c.loggedNuclearRestartBlocked {
-			c.loggedNuclearRestartBlocked = true
+		if c.escalation.shouldWarnRestartDisabled() {
 			slog.Warn("nuclear restart recovery disabled despite sustained blocked output",
-				"blocked_cycles", c.outputBlockedCycles,
+				"blocked_cycles", c.escalation.blockedCycles,
 				"desired_watts", desiredWatts,
 				"smoothed_grid_watts", smoothed,
 				"output_watts", currentOutputWatts,
@@ -317,15 +310,15 @@ func (c *Controller) maybeNuclearRestartRecovery(now time.Time, devStatus marste
 	if !c.cfg.NuclearRestartAckWiFiRecovery {
 		c.recordNuclearRestartOutcome("wifi_ack_missing")
 		slog.Error("nuclear restart recovery blocked: WiFi recovery acknowledgement missing",
-			"blocked_cycles", c.outputBlockedCycles,
+			"blocked_cycles", c.escalation.blockedCycles,
 			"ack_env", "NUCLEAR_RESTART_ACK_WIFI_RECOVERY=true")
 		return false, nil
 	}
 	minInterval := c.cfg.NuclearRestartMinInterval
-	if minInterval > 0 && !c.lastNuclearRestartAt.IsZero() && now.Sub(c.lastNuclearRestartAt) < minInterval {
+	if c.escalation.restartRateLimited(now, minInterval) {
 		c.recordNuclearRestartOutcome("rate_limited")
 		slog.Warn("nuclear restart recovery rate limited",
-			"last_restart_at", c.lastNuclearRestartAt,
+			"last_restart_at", c.escalation.lastRestartAt,
 			"min_interval", minInterval)
 		return false, nil
 	}
@@ -345,11 +338,8 @@ func (c *Controller) maybeNuclearRestartRecovery(now time.Time, devStatus marste
 		return false, err
 	}
 
-	blockedCycles := c.outputBlockedCycles
-	c.lastNuclearRestartAt = now
-	c.outputBlockedCycles = 0
-	c.lastOutputEnableAttemptAt = time.Time{}
-	c.loggedNuclearRestartBlocked = false
+	blockedCycles := c.escalation.blockedCycles
+	c.escalation.recordNuclearRestart(now)
 	c.recordSuccessfulPublish(marstek.RestartPayload, now, time.Time{})
 	if c.m != nil {
 		c.m.NuclearRestartTotal.WithLabelValues("restart_command_published").Inc()
